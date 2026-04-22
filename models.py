@@ -165,6 +165,55 @@ class AuditLog(Base):
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
+class Event(Base):
+    """Upcoming Pitham events shown on the public /pitham page."""
+    __tablename__ = "events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(200), nullable=False)
+    description = Column(Text, nullable=True)
+    event_date = Column(String(20), nullable=False, index=True)   # ISO date, e.g. "2026-05-12"
+    event_time = Column(String(20), nullable=True)                # e.g. "18:30"
+    location = Column(String(200), nullable=True)
+    image_url = Column(String(500), nullable=True)                # external URL OR uploaded file path
+    is_featured = Column(Boolean, default=False, nullable=False)  # admin-marked highlight
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class Testimonial(Base):
+    """Devotee testimonials shown on the public /pitham page."""
+    __tablename__ = "testimonials"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(150), nullable=False)
+    location = Column(String(150), nullable=True)
+    quote = Column(Text, nullable=False)
+    photo_path = Column(String(500), nullable=True)
+    sort_order = Column(Integer, default=0, nullable=False, index=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class PithamMedia(Base):
+    """Banners, videos/podcasts, and Instagram posts shown on the public /pitham page."""
+    __tablename__ = "pitham_media"
+
+    id = Column(Integer, primary_key=True, index=True)
+    kind = Column(String(20), nullable=False, index=True)         # "banner" | "video" | "instagram"
+    title = Column(String(200), nullable=True)                    # caption (banner) or title (video)
+    url = Column(String(1000), nullable=True)                     # video URL / instagram post URL
+    image_path = Column(String(500), nullable=True)               # uploaded image (banners; optional video thumbnail)
+    sort_order = Column(Integer, default=0, nullable=False, index=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class PendingSettingChange(Base):
     """Settings changes submitted by moderators, awaiting super admin approval."""
     __tablename__ = "pending_setting_changes"

@@ -1,30 +1,34 @@
 import logging
-import os
 from datetime import datetime, timedelta
+from typing import Optional
 
 import bcrypt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import jwt, JWTError
 from sqlalchemy.orm import Session
 
+from config import settings
 from database import get_db
 import models
 
 logger = logging.getLogger("pitham.auth")
 
-SECRET_KEY = os.getenv("SECRET_KEY", "")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24 * 7  # 7 days
+COOKIE_NAME = "pitham_session"
+IS_PROD = settings.core.is_production
 
 # Fail fast if SECRET_KEY is not set in production
-if os.getenv("ENV") == "production" and not SECRET_KEY:
+SECRET_KEY = settings.core.secret_key
+if IS_PROD and not SECRET_KEY:
     raise RuntimeError("SECRET_KEY environment variable must be set in production!")
 if not SECRET_KEY:
     SECRET_KEY = "dev-only-insecure-key-change-in-production"
     logger.warning("SECRET_KEY not set — using insecure default. Set it before deploying!")
 
-bearer_scheme = HTTPBearer()
+# auto_error=False so missing-Bearer doesn't 401 immediately — we'll then try the cookie.
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def hash_password(password: str) -> str:
@@ -54,11 +58,33 @@ def decode_token(token: str) -> dict:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
 
 
+def set_auth_cookie(response: Response, token: str) -> None:
+    """Set the auth token as an httpOnly cookie. Use this on login/register/google success."""
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=token,
+        max_age=ACCESS_TOKEN_EXPIRE_HOURS * 3600,
+        httponly=True,
+        secure=IS_PROD,            # only over HTTPS in prod
+        samesite="lax",            # blocks most CSRF; same-site fetches still work
+        path="/",
+    )
+
+
+def clear_auth_cookie(response: Response) -> None:
+    response.delete_cookie(key=COOKIE_NAME, path="/")
+
+
 def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
     db: Session = Depends(get_db),
 ) -> models.User:
-    payload = decode_token(credentials.credentials)
+    # Prefer Bearer (legacy / API clients), fall back to httpOnly cookie (browser).
+    token = credentials.credentials if credentials else request.cookies.get(COOKIE_NAME)
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    payload = decode_token(token)
     sub = payload.get("sub")
     try:
         user_id = int(sub)

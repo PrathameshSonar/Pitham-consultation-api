@@ -37,7 +37,7 @@ router = APIRouter(tags=["settings"])
 
 DEFAULT_TERMS = """<h3>Consultation Terms &amp; Conditions</h3>
 <ol>
-<li><strong>Services:</strong> Pitham provides astrology and spiritual consultation by Shri Mayuresh Vispute Guruji via Zoom.</li>
+<li><strong>Services:</strong> Shri Pitambara Baglamukhi Shakti Pitham, Ahilyanagar (SPBSP) provides astrology and spiritual consultation by Shri Mayuresh Guruji Vispute via Zoom.</li>
 <li><strong>Payment:</strong> Full payment is required before scheduling. Payments are non-refundable once the session is confirmed.</li>
 <li><strong>Privacy:</strong> Your personal information and consultation records are kept strictly confidential.</li>
 <li><strong>Rescheduling:</strong> If Guruji needs to reschedule, it will be done at no extra cost. For user-initiated rescheduling, raise a query.</li>

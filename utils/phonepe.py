@@ -1,14 +1,9 @@
 """
 PhonePe Payment Gateway integration using official Python SDK (Standard Checkout v2).
 
-Env vars required:
-  PHONEPE_CLIENT_ID      — your client ID
-  PHONEPE_CLIENT_SECRET   — your client secret
-  PHONEPE_CLIENT_VERSION  — client version (integer, e.g. 1)
-  PHONEPE_ENV             — "sandbox" or "production"
+All credentials are read from backend/config.py (→ .env).
 """
 
-import os
 from uuid import uuid4
 
 from phonepe.sdk.pg.payments.v2.standard_checkout_client import StandardCheckoutClient
@@ -16,15 +11,7 @@ from phonepe.sdk.pg.payments.v2.models.request.standard_checkout_pay_request imp
 from phonepe.sdk.pg.env import Env
 from phonepe.sdk.pg.common.exceptions import PhonePeException
 
-CLIENT_ID = os.getenv("PHONEPE_CLIENT_ID", "")
-CLIENT_SECRET = os.getenv("PHONEPE_CLIENT_SECRET", "")
-CLIENT_VERSION = int(os.getenv("PHONEPE_CLIENT_VERSION", "1"))
-PHONEPE_ENV = os.getenv("PHONEPE_ENV", "sandbox")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
-
-# Webhook callback credentials (configured in PhonePe dashboard)
-CALLBACK_USERNAME = os.getenv("PHONEPE_CALLBACK_USERNAME", "")
-CALLBACK_PASSWORD = os.getenv("PHONEPE_CALLBACK_PASSWORD", "")
+from config import settings
 
 
 class PhonePeError(Exception):
@@ -33,14 +20,15 @@ class PhonePeError(Exception):
 
 def _get_client() -> StandardCheckoutClient:
     """Get or create the singleton StandardCheckoutClient."""
-    if not CLIENT_ID or not CLIENT_SECRET:
+    cfg = settings.phonepe
+    if not cfg.is_configured():
         raise PhonePeError("PhonePe credentials not configured (PHONEPE_CLIENT_ID / PHONEPE_CLIENT_SECRET)")
 
-    env = Env.PRODUCTION if PHONEPE_ENV == "production" else Env.SANDBOX
+    env = Env.PRODUCTION if cfg.env == "production" else Env.SANDBOX
     return StandardCheckoutClient.get_instance(
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
-        client_version=CLIENT_VERSION,
+        client_id=cfg.client_id,
+        client_secret=cfg.client_secret,
+        client_version=cfg.client_version,
         env=env,
         should_publish_events=False,
     )
@@ -57,12 +45,12 @@ def initiate_payment(
     """
     client = _get_client()
 
-    merchant_order_id = f"PITHAM_{appointment_id}_{uuid4().hex[:8]}"
+    merchant_order_id = f"SPBSP_{appointment_id}_{uuid4().hex[:8]}"
     amount_paise = int(amount_rupees * 100)
     if amount_paise < 100:
         amount_paise = 100  # PhonePe minimum
 
-    redirect_url = f"{FRONTEND_URL}/appointments/payment-status?txn={merchant_order_id}"
+    redirect_url = f"{settings.core.frontend_url}/appointments/payment-status?txn={merchant_order_id}"
 
     try:
         pay_request = StandardCheckoutPayRequest.build_request(
@@ -106,14 +94,15 @@ def validate_callback(authorization_header: str, callback_body: str) -> dict:
     Returns { "event": "...", "state": "...", "merchant_order_id": "..." }
     """
     client = _get_client()
+    cfg = settings.phonepe
 
-    if not CALLBACK_USERNAME or not CALLBACK_PASSWORD:
+    if not cfg.callback_username or not cfg.callback_password:
         raise PhonePeError("Callback credentials not configured")
 
     try:
         callback_response = client.validate_callback(
-            username=CALLBACK_USERNAME,
-            password=CALLBACK_PASSWORD,
+            username=cfg.callback_username,
+            password=cfg.callback_password,
             callback_header_data=authorization_header,
             callback_response_data=callback_body,
         )

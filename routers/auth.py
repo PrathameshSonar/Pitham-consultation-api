@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 logger = logging.getLogger("pitham.auth")
 from pydantic import BaseModel
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Request, Query
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, Query
 from sqlalchemy.orm import Session
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -18,13 +18,17 @@ from google.auth.transport import requests as google_requests
 from database import get_db
 import models
 import schemas
-from utils.auth import hash_password, verify_password, create_token, get_current_user
-from utils.email import send_email
+from utils.auth import (
+    hash_password, verify_password, create_token, get_current_user,
+    set_auth_cookie, clear_auth_cookie,
+)
+from utils.email import send_email, send_password_reset_otp
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 limiter = Limiter(key_func=get_remote_address)
 
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+from config import settings
+GOOGLE_CLIENT_ID = settings.google.client_id
 
 
 # ── Pydantic models ─────────────────────────────────────────────────────────
@@ -70,7 +74,7 @@ def _validate_mobile(mobile: str) -> str:
 
 @router.post("/register", response_model=schemas.TokenResponse)
 @limiter.limit("10/minute")
-def register(request: Request, data: schemas.RegisterRequest, db: Session = Depends(get_db)):
+def register(request: Request, response: Response, data: schemas.RegisterRequest, db: Session = Depends(get_db)):
     name = _sanitize(data.name)
     email = _sanitize(data.email) if data.email else ""
     mobile = _validate_mobile(data.mobile) if data.mobile else ""
@@ -107,6 +111,7 @@ def register(request: Request, data: schemas.RegisterRequest, db: Session = Depe
     db.refresh(user)
 
     token = create_token({"sub": str(user.id), "role": user.role})
+    set_auth_cookie(response, token)
     return {"token": token, "role": user.role, "name": user.name}
 
 
@@ -114,7 +119,7 @@ def register(request: Request, data: schemas.RegisterRequest, db: Session = Depe
 
 @router.post("/login", response_model=schemas.TokenResponse)
 @limiter.limit("15/minute")
-def login(request: Request, data: schemas.LoginRequest, db: Session = Depends(get_db)):
+def login(request: Request, response: Response, data: schemas.LoginRequest, db: Session = Depends(get_db)):
     identifier = data.email or data.mobile
     if not identifier:
         raise HTTPException(status_code=400, detail="Email or mobile is required")
@@ -131,6 +136,7 @@ def login(request: Request, data: schemas.LoginRequest, db: Session = Depends(ge
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     token = create_token({"sub": str(user.id), "role": user.role})
+    set_auth_cookie(response, token)
     return {"token": token, "role": user.role, "name": user.name}
 
 
@@ -138,7 +144,7 @@ def login(request: Request, data: schemas.LoginRequest, db: Session = Depends(ge
 
 @router.post("/google", response_model=schemas.TokenResponse)
 @limiter.limit("15/minute")
-def google_login(request: Request, data: schemas.GoogleLoginRequest, db: Session = Depends(get_db)):
+def google_login(request: Request, response: Response, data: schemas.GoogleLoginRequest, db: Session = Depends(get_db)):
     if not GOOGLE_CLIENT_ID:
         raise HTTPException(status_code=500, detail="Google login not configured")
 
@@ -181,7 +187,16 @@ def google_login(request: Request, data: schemas.GoogleLoginRequest, db: Session
         db.refresh(user)
 
     token = create_token({"sub": str(user.id), "role": user.role})
+    set_auth_cookie(response, token)
     return {"token": token, "role": user.role, "name": user.name}
+
+
+# ── Logout — clears the auth cookie (Bearer clients can just drop their token) ─
+
+@router.post("/logout")
+def logout(response: Response):
+    clear_auth_cookie(response)
+    return {"message": "Logged out"}
 
 
 # ── Profile ──────────────────────────────────────────────────────────────────
@@ -234,6 +249,57 @@ def update_profile(
     return user
 
 
+# ── Account Deletion (DPDP / GDPR right-to-erasure) ─────────────────────────
+
+@router.delete("/account")
+def delete_account(
+    response: Response,
+    user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """User-initiated account deletion. Anonymizes appointments (preserves accounting
+    records as required for tax / financial compliance) and removes everything else
+    that's personal."""
+    if user.role == "admin":
+        # Last admin lockout protection. Demote first via super-admin route, then delete.
+        raise HTTPException(status_code=400, detail="Admins cannot self-delete. Demote first.")
+
+    user_id = user.id
+
+    # Detach personal data from appointments but keep the row for revenue records.
+    appts = db.query(models.Appointment).filter(models.Appointment.user_id == user_id).all()
+    for a in appts:
+        a.name = "(deleted user)"
+        a.email = ""
+        a.mobile = ""
+        a.dob = ""
+        a.tob = ""
+        a.birth_place = ""
+        a.problem = ""
+        a.selfie_path = None
+        a.notes = None
+
+    # Delete user-owned content with no accounting value
+    db.query(models.Document).filter(models.Document.user_id == user_id).delete()
+    db.query(models.Query).filter(models.Query.user_id == user_id).delete()
+    db.query(models.Recording).filter(models.Recording.user_id == user_id).delete()
+    db.query(models.UserListMember).filter(models.UserListMember.user_id == user_id).delete()
+    # Remove pending one-time tokens that referenced this user
+    rows = db.query(models.SiteSetting).filter(
+        models.SiteSetting.key.like("reset:%") | models.SiteSetting.key.like("verify:%")
+    ).all()
+    for r in rows:
+        if (r.value or "").startswith(f"{user_id}:"):
+            db.delete(r)
+
+    db.delete(user)
+    db.commit()
+
+    clear_auth_cookie(response)
+    logger.info("Account deleted: user_id=%s", user_id)
+    return {"message": "Account deleted"}
+
+
 # ── Notification Preferences ──────────────────────────────────────────────────
 
 class NotificationPrefsRequest(BaseModel):
@@ -271,17 +337,15 @@ def send_verification_email(request: Request, user: models.User = Depends(get_cu
     db.merge(models.SiteSetting(key=f"verify:{token}", value=f"{user.id}:{expiry}"))
     db.commit()
 
-    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-    verify_link = f"{frontend_url}/verify-email?token={token}"
+    verify_link = f"{settings.core.frontend_url}/verify-email?token={token}"
 
     send_email(
         to=user.email,
-        subject="Verify Your Email — Pitham Consultation",
+        subject="Verify Your Email — SPBSP, Ahilyanagar",
         html_body=f"""
         <div style="font-family:'Poppins',sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#3D2817">
           <div style="text-align:center;margin-bottom:20px">
-            <span style="font-size:2rem;color:#E65100">ॐ</span>
-            <h2 style="color:#7B1E1E">Pitham Consultation</h2>
+            <h2 style="color:#7B1E1E">Shri Pitambara Baglamukhi Shakti Pitham, Ahilyanagar</h2>
           </div>
           <h3>Namaste {user.name},</h3>
           <p>Click the link below to verify your email address:</p>
@@ -349,34 +413,19 @@ def forgot_password(request: Request, data: ForgotPasswordRequest, db: Session =
         # Don't reveal whether the user exists
         return {"message": "If an account exists, a reset link has been sent."}
 
-    # Generate a secure reset token and store it
-    reset_token = secrets.token_urlsafe(32)
-    # Store in SiteSetting as a simple key-value (reset:<token> = <user_id>:<expiry>)
-    expiry = (datetime.utcnow() + timedelta(hours=1)).isoformat()
+    # Generate a 6-digit numeric OTP and store it (valid for 10 minutes)
+    reset_token = f"{secrets.randbelow(1_000_000):06d}"
+    expiry = (datetime.utcnow() + timedelta(minutes=10)).isoformat()
     db.merge(models.SiteSetting(key=f"reset:{reset_token}", value=f"{user.id}:{expiry}"))
     db.commit()
 
-    # Send reset token via email
-    if user.email:
-        send_email(
-            to=user.email,
-            subject="Password Reset — Pitham Consultation",
-            html_body=f"""
-            <div style="font-family:'Poppins',Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#3D2817">
-              <div style="text-align:center;margin-bottom:20px">
-                <span style="font-size:2rem;color:#E65100">ॐ</span>
-                <h2 style="color:#7B1E1E;margin:4px 0">Pitham Consultation</h2>
-              </div>
-              <h3>Password Reset</h3>
-              <p>Use the token below to reset your password. This token expires in 1 hour.</p>
-              <div style="background:#FFF4DE;padding:16px;border-radius:8px;margin:16px 0;text-align:center">
-                <code style="font-size:1.2rem;font-weight:bold;color:#7B1E1E;word-break:break-all">{reset_token}</code>
-              </div>
-              <p>If you did not request this reset, please ignore this email.</p>
-              <p style="margin-top:24px">Regards,<br><strong>Pitham Consultation</strong></p>
-            </div>
-            """,
-        )
+    # Send OTP via email AND WhatsApp (each silently no-ops if not configured / no recipient)
+    send_password_reset_otp(
+        to_email=user.email or "",
+        to_mobile=user.mobile or "",
+        name=user.name,
+        otp=reset_token,
+    )
 
     logger.info("Password reset requested for user %s", user.id)
 
@@ -389,16 +438,21 @@ def reset_password(request: Request, data: ResetPasswordRequest, db: Session = D
     if len(data.new_password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
 
+    # OTPs are 6-digit numeric — reject malformed input early to keep brute-force surface small
+    otp = (data.token or "").strip()
+    if not (len(otp) == 6 and otp.isdigit()):
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP")
+
     row = db.query(models.SiteSetting).filter(
-        models.SiteSetting.key == f"reset:{data.token}"
+        models.SiteSetting.key == f"reset:{otp}"
     ).first()
 
     if not row:
-        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP")
 
     parts = row.value.split(":", 1)
     if len(parts) != 2:
-        raise HTTPException(status_code=400, detail="Invalid reset token")
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP")
 
     user_id, expiry_str = parts
     try:
@@ -406,9 +460,9 @@ def reset_password(request: Request, data: ResetPasswordRequest, db: Session = D
         if datetime.utcnow() > expiry:
             db.delete(row)
             db.commit()
-            raise HTTPException(status_code=400, detail="Reset token has expired")
+            raise HTTPException(status_code=400, detail="OTP has expired. Please request a new one.")
     except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid reset token")
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP")
 
     user = db.query(models.User).filter(models.User.id == int(user_id)).first()
     if not user:

@@ -70,6 +70,7 @@ def _mark_paid_and_generate_receipt(appt: models.Appointment, db: Session):
     try:
         send_booking_confirmation(
             to=appt.email,
+            mobile=appt.mobile,
             name=appt.name,
             booking_id=appt.id,
             fee=fee,

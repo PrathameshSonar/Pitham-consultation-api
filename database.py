@@ -1,15 +1,13 @@
 import logging
-import os
 
-from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
-from pathlib import Path
-load_dotenv(Path(__file__).resolve().parent / ".env")
+from config import settings
+
 logger = logging.getLogger("pitham.db")
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./pitham.db")
+DATABASE_URL = settings.core.database_url
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 
@@ -25,7 +23,7 @@ if not DATABASE_URL.startswith("sqlite"):
 engine = create_engine(
     DATABASE_URL,
     connect_args=connect_args,
-    echo=os.getenv("SQL_ECHO", "").lower() == "true",
+    echo=settings.core.sql_echo,
     **pool_kwargs,
 )
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)

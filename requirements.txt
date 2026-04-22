@@ -16,3 +16,7 @@ google-auth==2.38.0
 fpdf2==2.8.3
 slowapi==0.1.9
 bleach==6.2.0
+sentry-sdk[fastapi]==2.18.0
+alembic==1.14.0
+pytest==8.3.4
+httpx==0.28.1

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from typing import List, Optional
 
@@ -11,6 +11,9 @@ from utils.audit import log_action
 
 router = APIRouter(prefix="/admin/users", tags=["admin-users"])
 
+# Cap on how many moderators can exist at once.
+MAX_MODERATORS = 5
+
 
 @router.get("", response_model=List[schemas.UserOut])
 def list_users(
@@ -18,10 +21,11 @@ def list_users(
     city: Optional[str] = Query(None),
     state: Optional[str] = Query(None),
     country: Optional[str] = Query(None),
+    role: Optional[str] = Query(None, pattern="^(user|moderator|admin)$"),
     admin: models.User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    q = db.query(models.User).filter(models.User.role == "user")
+    q = db.query(models.User).filter(models.User.role == (role or "user"))
 
     if search:
         q = q.filter(models.User.name.ilike(f"%{search}%"))
@@ -90,18 +94,43 @@ def change_user_role(
     db: Session = Depends(get_db),
 ):
     if data.role not in ("user", "moderator", "admin"):
-        from fastapi import HTTPException
         raise HTTPException(status_code=400, detail="Role must be user, moderator, or admin")
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="User not found")
     if user.id == admin.id:
-        from fastapi import HTTPException
         raise HTTPException(status_code=400, detail="Cannot change your own role")
+    # Protect existing admins — only an admin can demote another admin via DB directly.
+    if user.role == "admin" and data.role != "admin":
+        raise HTTPException(status_code=400, detail="Cannot change another admin's role")
+
     old_role = user.role
+
+    # Enforce moderator cap when promoting INTO moderator
+    if data.role == "moderator" and old_role != "moderator":
+        current = (
+            db.query(models.User)
+            .filter(models.User.role == "moderator")
+            .count()
+        )
+        if current >= MAX_MODERATORS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Moderator limit reached ({MAX_MODERATORS}). Revoke an existing moderator first.",
+            )
+
     user.role = data.role
     db.commit()
     log_action(db, admin.id, "change_role", "user", user_id,
                f"{user.name}: {old_role} -> {data.role}")
     return {"message": f"Role changed to {data.role}"}
+
+
+@router.get("/moderators/count")
+def moderator_count(
+    admin: models.User = Depends(require_super_admin),
+    db: Session = Depends(get_db),
+):
+    """Return current moderator count and the configured maximum."""
+    current = db.query(models.User).filter(models.User.role == "moderator").count()
+    return {"current": current, "max": MAX_MODERATORS}

@@ -197,13 +197,13 @@ def generate_receipt(
     else:
         pdf.set_font("Helvetica", "", 9)
         pdf.multi_cell(0, 5, (
-            "1. Pitham provides astrology and spiritual consultation by "
-            "Shri Mayuresh Vispute Guruji via Zoom.\n"
+            "1. Shri Pitambara Baglamukhi Shakti Pitham, Ahilyanagar (SPBSP) provides astrology and spiritual consultation by "
+            "Shri Mayuresh Guruji Vispute via Zoom.\n"
             "2. Full payment is required before scheduling. Payments are non-refundable.\n"
             "3. Your personal information is kept strictly confidential.\n"
             "4. Astrological guidance is for spiritual purposes only.\n"
-            "5. All content is intellectual property of Pitham.\n"
-            "6. Pitham's liability is limited to the consultation fee paid."
+            "5. All content is intellectual property of SPBSP, Ahilyanagar.\n"
+            "6. SPBSP, Ahilyanagar's liability is limited to the consultation fee paid."
         ))
 
     # ── Footer ──
@@ -215,7 +215,7 @@ def generate_receipt(
     pdf.set_text_color(100, 100, 100)
     pdf.cell(
         0, 5,
-        f"Generated on {datetime.utcnow().strftime('%d %B %Y, %H:%M UTC')} | Pitham Consultation",
+        f"Generated on {datetime.utcnow().strftime('%d %B %Y, %H:%M UTC')} | Shri Pitambara Baglamukhi Shakti Pitham, Ahilyanagar",
         align="C",
     )
 

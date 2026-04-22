@@ -9,18 +9,10 @@ Setup:
    ZOOM_CLIENT_ID=...
    ZOOM_CLIENT_SECRET=...
 """
-import os
 import base64
 import requests
-from dotenv import load_dotenv
 
-from pathlib import Path
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-
-ZOOM_ACCOUNT_ID    = os.getenv("ZOOM_ACCOUNT_ID", "")
-ZOOM_CLIENT_ID     = os.getenv("ZOOM_CLIENT_ID", "")
-ZOOM_CLIENT_SECRET = os.getenv("ZOOM_CLIENT_SECRET", "")
-ZOOM_TIMEZONE      = os.getenv("ZOOM_TIMEZONE", "Asia/Kolkata")
+from config import settings
 
 
 class ZoomError(Exception):
@@ -28,19 +20,20 @@ class ZoomError(Exception):
 
 
 def _get_access_token() -> str:
-    if not all([ZOOM_ACCOUNT_ID, ZOOM_CLIENT_ID, ZOOM_CLIENT_SECRET]):
+    cfg = settings.zoom
+    if not cfg.is_configured():
         raise ZoomError(
             "Zoom credentials not configured. "
             "Set ZOOM_ACCOUNT_ID, ZOOM_CLIENT_ID, ZOOM_CLIENT_SECRET in .env"
         )
 
-    creds = f"{ZOOM_CLIENT_ID}:{ZOOM_CLIENT_SECRET}".encode()
+    creds = f"{cfg.client_id}:{cfg.client_secret}".encode()
     basic = base64.b64encode(creds).decode()
 
     r = requests.post(
         "https://zoom.us/oauth/token",
         headers={"Authorization": f"Basic {basic}"},
-        params={"grant_type": "account_credentials", "account_id": ZOOM_ACCOUNT_ID},
+        params={"grant_type": "account_credentials", "account_id": cfg.account_id},
         timeout=15,
     )
     if r.status_code != 200:
@@ -62,7 +55,7 @@ def create_meeting(
         "type": 2,  # scheduled meeting
         "start_time": start_at,
         "duration": duration,
-        "timezone": ZOOM_TIMEZONE,
+        "timezone": settings.zoom.timezone,
         "settings": {
             "join_before_host": False,
             "waiting_room": True,

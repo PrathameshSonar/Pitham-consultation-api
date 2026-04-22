@@ -204,10 +204,10 @@ def user_download_ics(
 
     dt_start = f"{appt.scheduled_date.replace('-', '')}T{appt.scheduled_time.replace(':', '')}00"
     ics = (
-        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Pitham//Consultation//EN\r\n"
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//SPBSP//Consultation//EN\r\n"
         "BEGIN:VEVENT\r\n"
         f"DTSTART:{dt_start}\r\nDURATION:PT45M\r\n"
-        f"SUMMARY:Pitham Consultation\r\n"
+        f"SUMMARY:SPBSP, Ahilyanagar — Consultation\r\n"
         f"DESCRIPTION:{appt.problem[:200]}\r\n"
         f"LOCATION:{appt.zoom_link or 'Zoom'}\r\n"
         "END:VEVENT\r\nEND:VCALENDAR\r\n"
@@ -383,6 +383,7 @@ def assign_slot(
     if user:
         send_appointment_confirmation(
             to=user.email,
+            mobile=user.mobile,
             name=user.name,
             scheduled_date=data.scheduled_date,
             scheduled_time=data.scheduled_time,
@@ -420,6 +421,7 @@ def reschedule(
     if user:
         send_reschedule_notification(
             to=user.email,
+            mobile=user.mobile,
             name=user.name,
             scheduled_date=data.scheduled_date,
             scheduled_time=data.scheduled_time,
@@ -506,6 +508,7 @@ async def mark_completed(
     try:
         send_completion_notification(
             to=appt.email,
+            mobile=appt.mobile,
             name=appt.name,
             booking_id=appt.id,
             analysis_path=appt.analysis_path or "",
@@ -543,14 +546,14 @@ def admin_cancel_appointment(
         from utils.email import send_email
         send_email(
             to=appt.email,
-            subject="Consultation Cancelled — Pitham",
+            subject="Consultation Cancelled — SPBSP, Ahilyanagar",
             html_body=f"""
             <div style="font-family:'Poppins',sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#3D2817">
               <h3>Namaste {appt.name},</h3>
-              <p>Your consultation <strong>PITHAM-{appt.id}</strong> has been cancelled by the admin.</p>
+              <p>Your consultation <strong>SPBSP-{appt.id}</strong> has been cancelled by the admin.</p>
               <p style="color:#C62828"><strong>Note:</strong> As per our no-refund policy, the consultation fee is non-refundable.</p>
               <p>If you have questions, please raise a query on your dashboard.</p>
-              <p>Regards,<br><strong>Pitham Consultation</strong></p>
+              <p>Regards,<br><strong>Shri Pitambara Baglamukhi Shakti Pitham, Ahilyanagar</strong></p>
             </div>
             """,
         )

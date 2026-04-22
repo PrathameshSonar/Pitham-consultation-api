@@ -1,11 +1,22 @@
 import logging
 import os
-from pathlib import Path
 
-from dotenv import load_dotenv
+# config.py handles load_dotenv() and exposes every credential via a typed settings object
+from config import settings
 
-# Load .env FIRST — before any module reads os.getenv()
-load_dotenv(Path(__file__).resolve().parent / ".env")
+# ── Sentry — initialise BEFORE FastAPI so unhandled errors during init are captured ──
+if settings.sentry.is_configured():
+    try:
+        import sentry_sdk
+        sentry_sdk.init(
+            dsn=settings.sentry.dsn,
+            environment=settings.core.env,
+            traces_sample_rate=settings.sentry.traces_rate,
+            send_default_pii=False,  # don't auto-send user IPs / cookies
+        )
+    except Exception:
+        # Never let observability take down the app
+        pass
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,12 +27,16 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from sqlalchemy import inspect, text
+
 from database import engine, Base
 import models  # noqa: F401 — registers all models with Base
 from routers import (
     auth, appointments, users, documents, queries,
-    recordings, user_lists, payments, settings, analytics, admin_tools,
+    recordings, user_lists, payments, analytics, admin_tools,
+    events, pitham,
 )
+from routers import settings as settings_router  # renamed to avoid collision with config.settings
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -33,11 +48,73 @@ logger = logging.getLogger("pitham")
 # ── DB tables ─────────────────────────────────────────────────────────────────
 Base.metadata.create_all(bind=engine)
 
+
+def _ensure_column(table: str, column: str, ddl: str):
+    """Add a column to an existing table if missing (idempotent micro-migration).
+
+    create_all() only creates missing tables — it never adds columns to existing
+    ones. Never raise from here — a failed migration should never block startup.
+    """
+    try:
+        insp = inspect(engine)
+        if table not in insp.get_table_names():
+            return  # create_all will handle it when the table is first created
+        existing = {c["name"] for c in insp.get_columns(table)}
+        if column in existing:
+            return
+        with engine.begin() as conn:
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))
+        logger.info("Migration: added column %s.%s", table, column)
+    except Exception as e:
+        logger.error("Migration failed for %s.%s: %s", table, column, e)
+
+
+# Micro-migrations — keep idempotent
+_ensure_column("events", "is_featured", "is_featured BOOLEAN NOT NULL DEFAULT 0")
+
+
+def _purge_expired_one_time_tokens():
+    """Clean up expired reset:/verify: entries in site_settings on startup.
+    These use the key-value table as a transient store; without cleanup the table grows
+    forever and 6-digit OTP keyspace (1M) can eventually collide with a fresh OTP."""
+    try:
+        from datetime import datetime
+        from sqlalchemy.orm import Session
+        from database import SessionLocal
+        db: Session = SessionLocal()
+        try:
+            rows = (
+                db.query(models.SiteSetting)
+                .filter(models.SiteSetting.key.like("reset:%") | models.SiteSetting.key.like("verify:%"))
+                .all()
+            )
+            now = datetime.utcnow()
+            removed = 0
+            for row in rows:
+                parts = (row.value or "").split(":", 1)
+                if len(parts) != 2:
+                    db.delete(row); removed += 1; continue
+                try:
+                    if datetime.fromisoformat(parts[1]) < now:
+                        db.delete(row); removed += 1
+                except ValueError:
+                    db.delete(row); removed += 1
+            if removed:
+                db.commit()
+                logger.info("Purged %d expired one-time tokens", removed)
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error("Token purge failed: %s", e)
+
+
+_purge_expired_one_time_tokens()
+
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(
-    title="Pitham Consultation API",
+    title="SPBSP, Ahilyanagar Consultation API",
     version="1.0.0",
-    docs_url="/docs" if os.getenv("ENV", "development") != "production" else None,
+    docs_url="/docs" if not settings.core.is_production else None,
     redoc_url=None,
 )
 
@@ -56,14 +133,50 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["X-XSS-Protection"] = "1; mode=block"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        # Strict Transport Security in production — forces HTTPS for a year.
+        if settings.core.is_production:
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         return response
 
 
 app.add_middleware(SecurityHeadersMiddleware)
 
 
+# ── Admin rate limit middleware ──────────────────────────────────────────────
+# Simple per-IP token bucket that throttles /admin/* to 120 requests / minute.
+# Authenticated admins hitting multiple endpoints still get plenty of headroom,
+# but a runaway script / compromised token can't hammer the server.
+import time
+from collections import defaultdict, deque
+
+ADMIN_RATE_LIMIT = settings.core.admin_rate_limit_per_min
+_admin_hits: dict[str, deque[float]] = defaultdict(deque)
+
+
+class AdminRateLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if path.startswith("/admin/") or path.startswith("/admin"):
+            ip = (request.client.host if request.client else "") or "unknown"
+            now = time.monotonic()
+            hits = _admin_hits[ip]
+            window_start = now - 60.0
+            while hits and hits[0] < window_start:
+                hits.popleft()
+            if len(hits) >= ADMIN_RATE_LIMIT:
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": f"Rate limit exceeded ({ADMIN_RATE_LIMIT}/min on admin endpoints). Please slow down."},
+                )
+            hits.append(now)
+        return await call_next(request)
+
+
+app.add_middleware(AdminRateLimitMiddleware)
+
+
 # ── CORS ──────────────────────────────────────────────────────────────────────
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+FRONTEND_URL = settings.core.frontend_url
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[FRONTEND_URL],
@@ -95,9 +208,11 @@ app.include_router(queries.router)
 app.include_router(recordings.router)
 app.include_router(user_lists.router)
 app.include_router(payments.router)
-app.include_router(settings.router)
+app.include_router(settings_router.router)
 app.include_router(analytics.router)
 app.include_router(admin_tools.router)
+app.include_router(events.router)
+app.include_router(pitham.router)
 
 
 @app.get("/health")
@@ -106,3 +221,4 @@ def health():
 
 
 logger.info("Pitham API started | CORS origin: %s", FRONTEND_URL)
+logger.info("Integrations configured: %s", settings.summary())

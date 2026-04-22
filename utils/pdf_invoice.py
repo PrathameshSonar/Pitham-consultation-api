@@ -137,7 +137,7 @@ def generate_invoice(
     pdf.cell(0, 5, "This is a computer-generated invoice and does not require a signature.", align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.cell(
         0, 5,
-        f"Generated on {datetime.utcnow().strftime('%d %B %Y, %H:%M UTC')} | Pitham Consultation",
+        f"Generated on {datetime.utcnow().strftime('%d %B %Y, %H:%M UTC')} | Shri Pitambara Baglamukhi Shakti Pitham, Ahilyanagar",
         align="C",
     )
 

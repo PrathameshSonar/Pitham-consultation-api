@@ -1,27 +1,26 @@
 import logging
 import os
 import smtplib
+from concurrent.futures import ThreadPoolExecutor
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
-from pathlib import Path
-from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+from config import settings
+from utils.whatsapp import send_whatsapp
+
 logger = logging.getLogger("pitham.email")
 
-MAIL_USERNAME = os.getenv("MAIL_USERNAME", "")
-MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", "")
-MAIL_FROM = os.getenv("MAIL_FROM", "") or MAIL_USERNAME
-MAIL_SERVER = os.getenv("MAIL_SERVER", "smtp.gmail.com")
-MAIL_PORT = int(os.getenv("MAIL_PORT", "587"))
+# Background pool — emails are sent off-request so SMTP latency doesn't block API responses.
+_email_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="email-")
 
-BRAND = "Pitham Consultation"
+BRAND = "Shri Pitambara Baglamukhi Shakti Pitham, Ahilyanagar"
+BRAND_SHORT = "SPBSP, Ahilyanagar"
 
-FOOTER = """
+FOOTER = f"""
 <hr style="border:none;border-top:1px solid #E8D9BF;margin:24px 0">
 <p style="color:#9C8573;font-size:12px">
-  This is an automated message from Pitham Consultation.<br>
+  This is an automated message from {BRAND}.<br>
   Please do not reply to this email.
 </p>
 """
@@ -31,7 +30,6 @@ def _wrap_html(body: str) -> str:
     return f"""
     <div style="font-family:'Poppins',Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#3D2817">
       <div style="text-align:center;margin-bottom:20px">
-        <span style="font-size:2rem;color:#E65100">ॐ</span>
         <h2 style="color:#7B1E1E;margin:4px 0">{BRAND}</h2>
       </div>
       {body}
@@ -40,18 +38,13 @@ def _wrap_html(body: str) -> str:
     """
 
 
-def send_email(to: str, subject: str, html_body: str, attachments: list[str] | None = None):
-    """Send email with optional file attachments. Never crashes the caller."""
-    if not to:
-        return
-    if not MAIL_USERNAME or not MAIL_PASSWORD:
-        logger.info("EMAIL (stub) to=%s subject=%s", to, subject)
-        return
-
+def _send_email_sync(to: str, subject: str, html_body: str, attachments: list[str] | None):
+    """Blocking SMTP send — runs in the background email pool, never on a request thread."""
+    cfg = settings.email
     try:
         msg = MIMEMultipart("mixed")
         msg["Subject"] = subject
-        msg["From"] = f"{BRAND} <{MAIL_FROM}>"
+        msg["From"] = f"{BRAND} <{cfg.from_addr}>"
         msg["To"] = to
 
         html_part = MIMEMultipart("alternative")
@@ -65,37 +58,52 @@ def send_email(to: str, subject: str, html_body: str, attachments: list[str] | N
                     part["Content-Disposition"] = f'attachment; filename="{os.path.basename(filepath)}"'
                     msg.attach(part)
 
-        with smtplib.SMTP(MAIL_SERVER, MAIL_PORT) as server:
+        with smtplib.SMTP(cfg.server, cfg.port) as server:
             server.starttls()
-            server.login(MAIL_USERNAME, MAIL_PASSWORD)
-            server.sendmail(MAIL_FROM, to, msg.as_string())
+            server.login(cfg.username, cfg.password)
+            server.sendmail(cfg.from_addr, to, msg.as_string())
         logger.info("EMAIL sent to=%s subject=%s", to, subject)
     except Exception as e:
         logger.error("EMAIL failed to=%s: %s", to, e)
 
 
+def send_email(to: str, subject: str, html_body: str, attachments: list[str] | None = None):
+    """Schedule an email send in the background. Returns immediately — never blocks the caller."""
+    if not to:
+        return
+    if not settings.email.is_configured():
+        logger.info("EMAIL (stub) to=%s subject=%s", to, subject)
+        return
+    _email_pool.submit(_send_email_sync, to, subject, html_body, attachments)
+
+
 # ── Email Templates ──────────────────────────────────────────────────────────
 
-def send_booking_confirmation(to: str, name: str, booking_id: int, fee: str, receipt_path: str = ""):
-    """Sent after payment is verified. Attaches receipt PDF if available."""
+def send_booking_confirmation(to: str, name: str, booking_id: int, fee: str, receipt_path: str = "", mobile: str = ""):
+    """Sent after payment is verified. Attaches receipt PDF if available. Also fires WhatsApp if `mobile` is supplied."""
     subject = f"Booking Confirmed — {BRAND}"
     body = _wrap_html(f"""
     <h3>Namaste {name},</h3>
-    <p>Your consultation booking <strong>PITHAM-{booking_id}</strong> has been confirmed.</p>
+    <p>Your consultation booking <strong>SPBSP-{booking_id}</strong> has been confirmed.</p>
     <div style="background:#FFF4DE;padding:16px;border-radius:8px;margin:16px 0">
       <p style="margin:0"><strong>Consultation Fee:</strong> ₹{fee}</p>
       <p style="margin:4px 0 0"><strong>Payment Status:</strong> <span style="color:#2E7D32">Paid ✓</span></p>
     </div>
     <p>Our team will review your request and schedule your consultation shortly. You will receive another email with the date, time, and Zoom link.</p>
     <p>If you have any questions, please use the Queries section in your dashboard.</p>
-    <p style="margin-top:24px">Regards,<br><strong>Shri Mayuresh Vispute Guruji</strong><br>{BRAND}</p>
+    <p style="margin-top:24px">Regards,<br><strong>Shri Mayuresh Guruji Vispute</strong><br>{BRAND}</p>
     """)
     attachments = [receipt_path] if receipt_path else []
     send_email(to, subject, body, attachments)
+    send_whatsapp(
+        mobile,
+        f"🙏 Namaste {name}, your {BRAND_SHORT} consultation booking SPBSP-{booking_id} is confirmed. "
+        f"Fee ₹{fee} paid. We'll share the date, time, and Zoom link shortly.",
+    )
 
 
-def send_appointment_confirmation(to: str, name: str, scheduled_date: str, scheduled_time: str, zoom_link: str):
-    """Sent when admin assigns a time slot."""
+def send_appointment_confirmation(to: str, name: str, scheduled_date: str, scheduled_time: str, zoom_link: str, mobile: str = ""):
+    """Sent when admin assigns a time slot. Also fires WhatsApp if `mobile` is supplied."""
     subject = f"Consultation Scheduled — {BRAND}"
     body = _wrap_html(f"""
     <h3>Namaste {name},</h3>
@@ -111,10 +119,15 @@ def send_appointment_confirmation(to: str, name: str, scheduled_date: str, sched
     <p style="margin-top:24px">Regards,<br><strong>{BRAND}</strong></p>
     """)
     send_email(to, subject, body)
+    send_whatsapp(
+        mobile,
+        f"🙏 {name}, your consultation with Guruji is scheduled for {scheduled_date} at {scheduled_time}.\n"
+        f"Join 5 min early: {zoom_link}\n— {BRAND_SHORT}",
+    )
 
 
-def send_reschedule_notification(to: str, name: str, scheduled_date: str, scheduled_time: str, zoom_link: str, reason: str = ""):
-    """Sent when admin reschedules."""
+def send_reschedule_notification(to: str, name: str, scheduled_date: str, scheduled_time: str, zoom_link: str, reason: str = "", mobile: str = ""):
+    """Sent when admin reschedules. Also fires WhatsApp if `mobile` is supplied."""
     subject = f"Consultation Rescheduled — {BRAND}"
     reason_text = f"<p><strong>Reason:</strong> {reason}</p>" if reason else ""
     body = _wrap_html(f"""
@@ -131,10 +144,16 @@ def send_reschedule_notification(to: str, name: str, scheduled_date: str, schedu
     <p style="margin-top:24px">Regards,<br><strong>{BRAND}</strong></p>
     """)
     send_email(to, subject, body)
+    reason_suffix = f"\nReason: {reason}" if reason else ""
+    send_whatsapp(
+        mobile,
+        f"🙏 {name}, your consultation has been rescheduled to {scheduled_date} at {scheduled_time}.{reason_suffix}\n"
+        f"Zoom: {zoom_link}\n— {BRAND_SHORT}",
+    )
 
 
-def send_completion_notification(to: str, name: str, booking_id: int, analysis_path: str = "", recording_link: str = ""):
-    """Sent when consultation is marked completed."""
+def send_completion_notification(to: str, name: str, booking_id: int, analysis_path: str = "", recording_link: str = "", mobile: str = ""):
+    """Sent when consultation is marked completed. Also fires WhatsApp if `mobile` is supplied."""
     subject = f"Consultation Completed — {BRAND}"
     extras = ""
     if analysis_path:
@@ -143,7 +162,7 @@ def send_completion_notification(to: str, name: str, booking_id: int, analysis_p
         extras += f'<p>🎥 <strong>Recording:</strong> <a href="{recording_link}" style="color:#E65100">Watch Recording</a></p>'
     body = _wrap_html(f"""
     <h3>Namaste {name},</h3>
-    <p>Your consultation <strong>PITHAM-{booking_id}</strong> has been completed.</p>
+    <p>Your consultation <strong>SPBSP-{booking_id}</strong> has been completed.</p>
     {extras}
     <p>Please check your dashboard for:</p>
     <ul>
@@ -152,6 +171,35 @@ def send_completion_notification(to: str, name: str, booking_id: int, analysis_p
       <li>Session recording (if available)</li>
     </ul>
     <p>If you need any follow-up, please book a new consultation or raise a query.</p>
-    <p style="margin-top:24px">Regards,<br><strong>Shri Mayuresh Vispute Guruji</strong><br>{BRAND}</p>
+    <p style="margin-top:24px">Regards,<br><strong>Shri Mayuresh Guruji Vispute</strong><br>{BRAND}</p>
     """)
     send_email(to, subject, body)
+    wa_lines = [f"🙏 {name}, your consultation SPBSP-{booking_id} is complete."]
+    if analysis_path:
+        wa_lines.append("✅ Analysis uploaded to your dashboard.")
+    if recording_link:
+        wa_lines.append(f"🎥 Recording: {recording_link}")
+    wa_lines.append(f"— {BRAND_SHORT}")
+    send_whatsapp(mobile, "\n".join(wa_lines))
+
+
+# ── OTP helper — send a password reset code over both channels ───────────────
+
+def send_password_reset_otp(to_email: str, to_mobile: str, name: str, otp: str):
+    """Send the 6-digit reset OTP via email AND WhatsApp (whichever is configured).
+    Callers can leave either recipient blank."""
+    subject = f"Password Reset OTP — {BRAND_SHORT}"
+    body = _wrap_html(f"""
+    <h3>Namaste {name or "Devotee"},</h3>
+    <p>Use the 6-digit OTP below to reset your password. This OTP is valid for <strong>10 minutes</strong>.</p>
+    <div style="background:#FFF4DE;padding:20px;border-radius:8px;margin:16px 0;text-align:center">
+      <code style="font-size:2rem;font-weight:bold;color:#7B1E1E;letter-spacing:0.4em">{otp}</code>
+    </div>
+    <p>If you did not request this reset, please ignore this message.</p>
+    <p style="margin-top:24px">Regards,<br><strong>{BRAND}</strong></p>
+    """)
+    send_email(to_email, subject, body)
+    send_whatsapp(
+        to_mobile,
+        f"🔐 Your {BRAND_SHORT} password reset OTP is *{otp}*. Valid for 10 minutes. If you did not request this, please ignore.",
+    )

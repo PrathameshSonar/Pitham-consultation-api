@@ -208,3 +208,115 @@ class RecordingOut(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# ── Event (Pitham upcoming events) ───────────────────────────────────────────
+
+class EventCreate(BaseModel):
+    title: str
+    description: Optional[str] = None
+    event_date: str                         # ISO date "YYYY-MM-DD"
+    event_time: Optional[str] = None        # "HH:MM"
+    location: Optional[str] = None
+    image_url: Optional[str] = None
+    is_featured: Optional[bool] = False
+
+
+class EventUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    event_date: Optional[str] = None
+    event_time: Optional[str] = None
+    location: Optional[str] = None
+    image_url: Optional[str] = None
+    is_featured: Optional[bool] = None
+
+
+class EventOut(BaseModel):
+    id: int
+    title: str
+    description: Optional[str] = None
+    event_date: str
+    event_time: Optional[str] = None
+    location: Optional[str] = None
+    image_url: Optional[str] = None
+    is_featured: bool = False
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ── Testimonial ──────────────────────────────────────────────────────────────
+
+class TestimonialCreate(BaseModel):
+    name: str
+    location: Optional[str] = None
+    quote: str
+    photo_path: Optional[str] = None
+    sort_order: Optional[int] = 0
+    is_active: Optional[bool] = True
+
+
+class TestimonialUpdate(BaseModel):
+    name: Optional[str] = None
+    location: Optional[str] = None
+    quote: Optional[str] = None
+    photo_path: Optional[str] = None
+    sort_order: Optional[int] = None
+    is_active: Optional[bool] = None
+
+
+class TestimonialOut(BaseModel):
+    id: int
+    name: str
+    location: Optional[str] = None
+    quote: str
+    photo_path: Optional[str] = None
+    sort_order: int = 0
+    is_active: bool = True
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ── Pitham Media (banners, videos, instagram) ────────────────────────────────
+
+class PithamMediaCreate(BaseModel):
+    kind: str                                # "banner" | "video" | "instagram"
+    title: Optional[str] = None
+    url: Optional[str] = None
+    image_path: Optional[str] = None
+    sort_order: Optional[int] = 0
+    is_active: Optional[bool] = True
+
+
+class PithamMediaUpdate(BaseModel):
+    title: Optional[str] = None
+    url: Optional[str] = None
+    image_path: Optional[str] = None
+    sort_order: Optional[int] = None
+    is_active: Optional[bool] = None
+
+
+class PithamMediaOut(BaseModel):
+    id: int
+    kind: str
+    title: Optional[str] = None
+    url: Optional[str] = None
+    image_path: Optional[str] = None
+    sort_order: int = 0
+    is_active: bool = True
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ── Pitham CMS bundle (single public fetch) ──────────────────────────────────
+
+class PithamCmsBundle(BaseModel):
+    banners: list[PithamMediaOut]
+    videos: list[PithamMediaOut]
+    instagram: list[PithamMediaOut]
+    gallery: list[PithamMediaOut]
+    testimonials: list[TestimonialOut]
+    featured_events: list[EventOut]

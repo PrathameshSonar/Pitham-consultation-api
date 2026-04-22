@@ -257,8 +257,7 @@ def send_appointment_reminders(
         body = f"""
         <div style="font-family:'Poppins',Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#3D2817">
           <div style="text-align:center;margin-bottom:20px">
-            <span style="font-size:2rem;color:#E65100">ॐ</span>
-            <h2 style="color:#7B1E1E;margin:4px 0">Pitham Consultation</h2>
+            <h2 style="color:#7B1E1E;margin:4px 0">Shri Pitambara Baglamukhi Shakti Pitham, Ahilyanagar</h2>
           </div>
           <h3>Namaste {a.name},</h3>
           <p>This is a reminder that your consultation with Guruji is <strong>tomorrow</strong>.</p>
@@ -270,7 +269,7 @@ def send_appointment_reminders(
             </table>
           </div>
           <p>Please join the Zoom meeting <strong>5 minutes before</strong> the scheduled time.</p>
-          <p style="margin-top:24px">Regards,<br><strong>Pitham Consultation</strong></p>
+          <p style="margin-top:24px">Regards,<br><strong>Shri Pitambara Baglamukhi Shakti Pitham, Ahilyanagar</strong></p>
         </div>
         """
         send_email(a.email, "Consultation Reminder — Tomorrow", body)
@@ -298,11 +297,11 @@ def download_ics(
     ics = (
         "BEGIN:VCALENDAR\r\n"
         "VERSION:2.0\r\n"
-        "PRODID:-//Pitham//Consultation//EN\r\n"
+        "PRODID:-//SPBSP//Consultation//EN\r\n"
         "BEGIN:VEVENT\r\n"
         f"DTSTART:{dt_start}\r\n"
         f"DURATION:PT45M\r\n"
-        f"SUMMARY:Pitham Consultation — {appt.name}\r\n"
+        f"SUMMARY:SPBSP, Ahilyanagar — {appt.name}\r\n"
         f"DESCRIPTION:{appt.problem[:200]}\r\n"
         f"LOCATION:{appt.zoom_link or 'Zoom'}\r\n"
         f"URL:{appt.zoom_link or ''}\r\n"
