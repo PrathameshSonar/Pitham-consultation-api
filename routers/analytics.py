@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
-from sqlalchemy import func, extract
+from sqlalchemy import func
 from datetime import datetime, timedelta
 
 from database import get_db
@@ -9,6 +9,18 @@ from utils.auth import require_admin
 from utils.site_settings import get_consultation_fee
 
 router = APIRouter(prefix="/admin/analytics", tags=["analytics"])
+
+
+def _month_expr(db: Session, column):
+    """Cross-dialect 'YYYY-MM' string from a DateTime column.
+    PostgreSQL → to_char, MySQL → date_format, SQLite → strftime."""
+    dialect = db.bind.dialect.name if db.bind is not None else ""
+    if dialect == "postgresql":
+        return func.to_char(column, "YYYY-MM")
+    if dialect in ("mysql", "mariadb"):
+        return func.date_format(column, "%Y-%m")
+    # SQLite + anything else we run locally
+    return func.strftime("%Y-%m", column)
 
 
 @router.get("")
@@ -44,52 +56,25 @@ def get_analytics(
 
     # ── Appointments per month (last 6 months, for bar chart) ──
     six_months_ago = now - timedelta(days=180)
+    appt_month = _month_expr(db, models.Appointment.created_at).label("month")
     monthly_raw = (
-        db.query(
-            func.date_format(models.Appointment.created_at, "%Y-%m").label("month"),
-            func.count(models.Appointment.id),
-        )
+        db.query(appt_month, func.count(models.Appointment.id))
         .filter(models.Appointment.created_at >= six_months_ago)
-        .group_by("month")
-        .order_by("month")
+        .group_by(appt_month)
+        .order_by(appt_month)
         .all()
     )
-    # Fallback for SQLite which doesn't have date_format
-    if not monthly_raw:
-        monthly_raw = (
-            db.query(
-                func.strftime("%Y-%m", models.Appointment.created_at).label("month"),
-                func.count(models.Appointment.id),
-            )
-            .filter(models.Appointment.created_at >= six_months_ago)
-            .group_by("month")
-            .order_by("month")
-            .all()
-        )
     appointments_per_month = [{"month": m, "count": c} for m, c in monthly_raw]
 
     # ── New users per month (last 6 months) ──
+    user_month = _month_expr(db, models.User.created_at).label("month")
     users_monthly_raw = (
-        db.query(
-            func.date_format(models.User.created_at, "%Y-%m").label("month"),
-            func.count(models.User.id),
-        )
+        db.query(user_month, func.count(models.User.id))
         .filter(models.User.created_at >= six_months_ago, models.User.role == "user")
-        .group_by("month")
-        .order_by("month")
+        .group_by(user_month)
+        .order_by(user_month)
         .all()
     )
-    if not users_monthly_raw:
-        users_monthly_raw = (
-            db.query(
-                func.strftime("%Y-%m", models.User.created_at).label("month"),
-                func.count(models.User.id),
-            )
-            .filter(models.User.created_at >= six_months_ago, models.User.role == "user")
-            .group_by("month")
-            .order_by("month")
-            .all()
-        )
     users_per_month = [{"month": m, "count": c} for m, c in users_monthly_raw]
 
     # ── Recent activity (last 30 days) ──
@@ -115,33 +100,17 @@ def get_analytics(
     total_hours = (total_completed * 30) / 60  # avg 30 min per consultation
 
     # Monthly revenue (last 6 months)
+    completed_month = _month_expr(db, models.Appointment.updated_at).label("month")
     completed_monthly_raw = (
-        db.query(
-            func.date_format(models.Appointment.updated_at, "%Y-%m").label("month"),
-            func.count(models.Appointment.id),
-        )
+        db.query(completed_month, func.count(models.Appointment.id))
         .filter(
             models.Appointment.status == "completed",
             models.Appointment.updated_at >= six_months_ago,
         )
-        .group_by("month")
-        .order_by("month")
+        .group_by(completed_month)
+        .order_by(completed_month)
         .all()
     )
-    if not completed_monthly_raw:
-        completed_monthly_raw = (
-            db.query(
-                func.strftime("%Y-%m", models.Appointment.updated_at).label("month"),
-                func.count(models.Appointment.id),
-            )
-            .filter(
-                models.Appointment.status == "completed",
-                models.Appointment.updated_at >= six_months_ago,
-            )
-            .group_by("month")
-            .order_by("month")
-            .all()
-        )
     revenue_per_month = [{"month": m, "count": c, "revenue": c * fee} for m, c in completed_monthly_raw]
 
     return {
