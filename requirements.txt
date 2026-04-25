@@ -9,6 +9,7 @@ pillow==12.2.0
 fastapi-mail==1.4.2
 python-dotenv==1.0.1
 pymysql==1.1.1
+psycopg2-binary==2.9.10  # Postgres driver (Neon / Supabase / RDS)
 cryptography==44.0.2
 requests
 phonepe-pg-sdk-python
