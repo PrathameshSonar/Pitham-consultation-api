@@ -20,4 +20,4 @@ sentry-sdk[fastapi]==2.18.0
 alembic==1.14.0
 pytest==8.3.4
 httpx==0.28.1
-pkg_resources
+setuptools>=70.0.0
