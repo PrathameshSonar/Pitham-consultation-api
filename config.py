@@ -51,6 +51,7 @@ class CoreConfig:
     secret_key: str = field(default_factory=lambda: _env("SECRET_KEY", ""))
     database_url: str = field(default_factory=lambda: _env("DATABASE_URL", "sqlite:///./pitham.db"))
     frontend_url: str = field(default_factory=lambda: _env("FRONTEND_URL", "http://localhost:3000"))
+    backend_url: str = field(default_factory=lambda: _env("BACKEND_URL", "http://localhost:8000"))
     sql_echo: bool = field(default_factory=lambda: _env_bool("SQL_ECHO"))
     admin_rate_limit_per_min: int = field(default_factory=lambda: _env_int("ADMIN_RATE_LIMIT_PER_MIN", 120))
 

@@ -20,11 +20,35 @@ from utils.storage import storage
 from utils.uploads import IMAGE_MIMES, validate_upload, check_size, safe_filename
 from utils.email import send_email
 from utils.whatsapp import send_whatsapp
+from config import settings
 
 logger = logging.getLogger("pitham.broadcasts")
 router = APIRouter(tags=["broadcasts"])
 
 MAX_IMAGE_SIZE = 8 * 1024 * 1024  # 8MB
+
+
+def _absolute_image_url(image_path: str | None) -> str | None:
+    """Build an absolute URL for a stored image so it renders inside email clients.
+    For S3-style storage, public_url already returns absolute. For local storage,
+    prepend the backend's public URL."""
+    if not image_path:
+        return None
+    url = storage.public_url(image_path)
+    if url.startswith("http://") or url.startswith("https://"):
+        return url
+    base = (settings.core.backend_url or "").rstrip("/")
+    return f"{base}{url}" if url.startswith("/") else f"{base}/{url}"
+
+
+def _local_image_filepath(image_path: str | None) -> str | None:
+    """If the image is on local disk, return the absolute file path so we can
+    attach it to the email. S3-stored images return None (URL-only embed)."""
+    if not image_path:
+        return None
+    import os
+    candidate = os.path.join(os.getcwd(), image_path)
+    return candidate if os.path.exists(candidate) else None
 
 
 def _broadcast_recipients(db: Session, b: models.Broadcast) -> list[models.User]:
@@ -98,13 +122,22 @@ async def create_broadcast(
     # Fan-out via email + WhatsApp (each safe-no-op when not configured / no recipient)
     try:
         recipients = _broadcast_recipients(db, b)
-        plain = f"{b.title}\n\n{b.message}"
+        img_url = _absolute_image_url(b.image_path)
+        img_file = _local_image_filepath(b.image_path)
+        img_html = (
+            f'<div style="margin:16px 0"><img src="{img_url}" alt="" '
+            f'style="max-width:100%;height:auto;border-radius:8px;display:block"></div>'
+            if img_url else ""
+        )
+        attachments = [img_file] if img_file else None
+        plain = f"{b.title}\n\n{b.message}" + (f"\n\n{img_url}" if img_url else "")
         for u in recipients:
             if u.email:
                 send_email(
                     u.email,
                     f"📢 {b.title}",
-                    f"<h3>{b.title}</h3><p style='line-height:1.7'>{b.message}</p>",
+                    f"<h3>{b.title}</h3>{img_html}<p style='line-height:1.7;white-space:pre-wrap'>{b.message}</p>",
+                    attachments=attachments,
                 )
             if u.mobile:
                 send_whatsapp(u.mobile, plain)
