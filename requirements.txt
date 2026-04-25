@@ -20,5 +20,7 @@ sentry-sdk[fastapi]==2.18.0
 alembic==1.14.0
 pytest==8.3.4
 httpx==0.28.1
-apscheduler>=3.11.0,<4
-setuptools<81
+# PhonePe SDK pins APScheduler<=3.10.1, which imports `pkg_resources` at
+# module init. setuptools 81 (Nov 2025) removed pkg_resources entirely.
+# Until PhonePe ships a newer SDK we must hold setuptools at <81.
+setuptools>=70,<81
