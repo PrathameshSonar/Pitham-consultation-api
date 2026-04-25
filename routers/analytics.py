@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from database import get_db
 import models
 from utils.auth import require_admin
+from utils.site_settings import get_consultation_fee
 
 router = APIRouter(prefix="/admin/analytics", tags=["analytics"])
 
@@ -105,8 +106,7 @@ def get_analytics(
     open_queries = db.query(models.Query).filter(models.Query.status == "open").count()
 
     # ── Revenue & consultation time ──
-    fee_row = db.query(models.SiteSetting).filter(models.SiteSetting.key == "consultation_fee").first()
-    fee = int(fee_row.value) if fee_row else 500
+    fee = get_consultation_fee(db)
 
     total_completed = db.query(models.Appointment).filter(
         models.Appointment.status == "completed"

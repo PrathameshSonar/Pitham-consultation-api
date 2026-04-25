@@ -34,11 +34,13 @@ def generate_invoice(
 
     # ── Header ──
     pdf.set_fill_color(123, 30, 30)
-    pdf.rect(0, 0, 210, 42, "F")
+    pdf.rect(0, 0, 210, 46, "F")
     pdf.set_text_color(255, 255, 255)
-    pdf.set_font("Helvetica", "B", 24)
-    pdf.set_y(8)
-    pdf.cell(0, 14, "PITHAM CONSULTATION", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.set_y(7)
+    pdf.cell(0, 8, "SHRI PITAMBARA BAGLAMUKHI SHAKTI PITHAM", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 6, "AHILYANAGAR", align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 10)
     pdf.cell(0, 8, "Payment Invoice / Bill Receipt", align="C", new_x="LMARGIN", new_y="NEXT")
 
@@ -124,7 +126,7 @@ def generate_invoice(
     pdf.set_text_color(100, 100, 100)
     if payment_reference:
         pdf.cell(0, 6, f"Transaction Reference: {payment_reference}", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(0, 6, f"Booking ID: PITHAM-{appointment_id}", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 6, f"Booking ID: SPBSP-{appointment_id}", new_x="LMARGIN", new_y="NEXT")
 
     # ── Footer ──
     pdf.ln(16)

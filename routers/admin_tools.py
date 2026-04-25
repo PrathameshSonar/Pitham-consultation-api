@@ -16,6 +16,7 @@ import models
 from utils.auth import require_admin, require_super_admin
 from utils.audit import log_action
 from utils.email import send_email
+from utils.site_settings import get_setting
 
 router = APIRouter(prefix="/admin", tags=["admin-tools"])
 
@@ -217,11 +218,10 @@ def export_payments_csv(
     writer = csv.writer(output)
     writer.writerow(["Booking ID", "Name", "Email", "Mobile", "Payment Ref", "Amount", "Date"])
 
-    fee_row = db.query(models.SiteSetting).filter(models.SiteSetting.key == "consultation_fee").first()
-    fee = fee_row.value if fee_row else "500"
+    fee = get_setting(db, "consultation_fee")
 
     for a in appts:
-        writer.writerow([f"PITHAM-{a.id}", a.name, a.email, a.mobile, a.payment_reference or "",
+        writer.writerow([f"SPBSP-{a.id}", a.name, a.email, a.mobile, a.payment_reference or "",
                          fee, a.created_at.strftime("%Y-%m-%d") if a.created_at else ""])
     output.seek(0)
     log_action(db, admin.id, "export_payments", "export", 0, f"{len(appts)} payments")

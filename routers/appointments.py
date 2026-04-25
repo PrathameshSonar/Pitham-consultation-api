@@ -20,6 +20,7 @@ from utils.auth import get_current_user, require_admin, require_super_admin
 from utils.audit import log_action
 from utils.email import send_appointment_confirmation, send_reschedule_notification, send_completion_notification
 from utils.zoom import create_meeting as zoom_create_meeting, ZoomError
+from utils.site_settings import get_setting
 
 router = APIRouter(tags=["appointments"])
 
@@ -264,8 +265,7 @@ def user_generate_receipt(
     if appt.payment_status != "paid":
         raise HTTPException(status_code=400, detail="Payment not verified yet")
 
-    fee_row = db.query(models.SiteSetting).filter(models.SiteSetting.key == "consultation_fee").first()
-    fee = fee_row.value if fee_row else "500"
+    fee = get_setting(db, "consultation_fee")
 
     # Use the T&C the user agreed to at booking time
     terms_html = appt.agreed_terms or ""
@@ -309,8 +309,7 @@ def user_generate_invoice(
     if appt.payment_status != "paid":
         raise HTTPException(status_code=400, detail="Payment not verified yet")
 
-    fee_row = db.query(models.SiteSetting).filter(models.SiteSetting.key == "consultation_fee").first()
-    fee = fee_row.value if fee_row else "500"
+    fee = get_setting(db, "consultation_fee")
 
     invoice_path = generate_invoice(
         appointment_id=appt.id,
@@ -577,8 +576,7 @@ def admin_generate_receipt(
     if not appt:
         raise HTTPException(status_code=404, detail="Appointment not found")
 
-    fee_row = db.query(models.SiteSetting).filter(models.SiteSetting.key == "consultation_fee").first()
-    fee = fee_row.value if fee_row else "500"
+    fee = get_setting(db, "consultation_fee")
 
     # Use the T&C the user agreed to at booking time
     terms_html = appt.agreed_terms or ""
@@ -616,8 +614,7 @@ def admin_generate_invoice(
     if not appt:
         raise HTTPException(status_code=404, detail="Appointment not found")
 
-    fee_row = db.query(models.SiteSetting).filter(models.SiteSetting.key == "consultation_fee").first()
-    fee = fee_row.value if fee_row else "500"
+    fee = get_setting(db, "consultation_fee")
 
     invoice_path = generate_invoice(
         appointment_id=appt.id,
@@ -662,8 +659,7 @@ def admin_download_invoices(
     if not appts:
         raise HTTPException(status_code=404, detail="No paid appointments found in this date range.")
 
-    fee_row = db.query(models.SiteSetting).filter(models.SiteSetting.key == "consultation_fee").first()
-    fee = fee_row.value if fee_row else "500"
+    fee = get_setting(db, "consultation_fee")
 
     # Generate all invoices and zip them
     zip_buffer = io.BytesIO()

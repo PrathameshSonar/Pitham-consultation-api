@@ -123,20 +123,22 @@ def generate_receipt(
 
     # ── Header ──
     pdf.set_fill_color(123, 30, 30)  # maroon
-    pdf.rect(0, 0, 210, 38, "F")
+    pdf.rect(0, 0, 210, 42, "F")
     pdf.set_text_color(255, 255, 255)
-    pdf.set_font("Helvetica", "B", 22)
-    pdf.set_y(8)
-    pdf.cell(0, 12, "PITHAM CONSULTATION", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.set_y(7)
+    pdf.cell(0, 8, "SHRI PITAMBARA BAGLAMUKHI SHAKTI PITHAM", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 6, "AHILYANAGAR", align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 10)
     pdf.cell(0, 8, "Booking Confirmation & Receipt", align="C", new_x="LMARGIN", new_y="NEXT")
 
     pdf.set_text_color(0, 0, 0)
-    pdf.ln(10)
+    pdf.ln(12)
 
     # ── Booking ID & Date ──
     pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(95, 8, f"Booking ID: PITHAM-{appointment_id}", new_x="RIGHT")
+    pdf.cell(95, 8, f"Booking ID: SPBSP-{appointment_id}", new_x="RIGHT")
     pdf.cell(95, 8, f"Date: {booked_on}", align="R", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(2)
 

@@ -20,6 +20,7 @@ from database import get_db
 import models
 from utils.auth import require_admin, require_super_admin, get_current_user
 from utils.audit import log_action
+from utils.site_settings import DEFAULTS, get_setting as _get, set_setting as _set
 from datetime import datetime
 
 # Allowed HTML tags/attrs for consultation terms (rich text editor output)
@@ -35,50 +36,9 @@ ALLOWED_ATTRS = {
 
 router = APIRouter(tags=["settings"])
 
-DEFAULT_TERMS = """<h3>Consultation Terms &amp; Conditions</h3>
-<ol>
-<li><strong>Services:</strong> Shri Pitambara Baglamukhi Shakti Pitham, Ahilyanagar (SPBSP) provides astrology and spiritual consultation by Shri Mayuresh Guruji Vispute via Zoom.</li>
-<li><strong>Payment:</strong> Full payment is required before scheduling. Payments are non-refundable once the session is confirmed.</li>
-<li><strong>Privacy:</strong> Your personal information and consultation records are kept strictly confidential.</li>
-<li><strong>Rescheduling:</strong> If Guruji needs to reschedule, it will be done at no extra cost. For user-initiated rescheduling, raise a query.</li>
-<li><strong>Disclaimer:</strong> Astrological guidance is for spiritual and informational purposes only. It does not constitute medical, legal, or financial advice.</li>
-<li><strong>Conduct:</strong> Users must be respectful during consultations. Inappropriate behaviour may lead to session cancellation without refund.</li>
-</ol>"""
-
-DEFAULTS = {
-    "consultation_fee": "3500",
-    "booking_enabled": "true",
-    "booking_resume_date": "",
-    "booking_hold_message": "",
-    "booking_limit": "0",
-    "booking_limit_deadline": "",
-    "consultation_terms": DEFAULT_TERMS,
-    # Social links
-    "social_facebook": "",
-    "social_instagram": "",
-    "social_youtube": "",
-    "social_twitter": "",
-    "social_whatsapp": "",
-    # Contact info
-    "contact_email": "",
-    "contact_phone": "",
-    "contact_address": "",
-    "contact_map_url": "",
-}
-
-
-def _get(db: Session, key: str) -> str:
-    row = db.query(models.SiteSetting).filter(models.SiteSetting.key == key).first()
-    return row.value if row else DEFAULTS.get(key, "")
-
-
-def _set(db: Session, key: str, value: str):
-    row = db.query(models.SiteSetting).filter(models.SiteSetting.key == key).first()
-    if row:
-        row.value = value
-    else:
-        db.add(models.SiteSetting(key=key, value=value))
-    db.commit()
+# DEFAULTS + _get + _set live in utils/site_settings.py — re-imported above so all
+# call sites in this file (the moderator approval flow, public settings endpoint,
+# admin update) keep working with no other change.
 
 
 # ── Public: read settings (needed by frontend) ─────────────────────────────
@@ -86,7 +46,7 @@ def _set(db: Session, key: str, value: str):
 @router.get("/settings/public")
 def get_public_settings(db: Session = Depends(get_db)):
     return {
-        "consultation_fee": int(_get(db, "consultation_fee") or "500"),
+        "consultation_fee": int(_get(db, "consultation_fee") or DEFAULTS["consultation_fee"]),
         "booking_enabled": _get(db, "booking_enabled") == "true",
         "booking_resume_date": _get(db, "booking_resume_date"),
         "booking_hold_message": _get(db, "booking_hold_message"),

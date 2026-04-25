@@ -10,6 +10,7 @@ from utils.phonepe import (
 )
 from utils.pdf_receipt import generate_receipt
 from utils.email import send_booking_confirmation
+from utils.site_settings import get_setting
 
 router = APIRouter(prefix="/payments", tags=["payments"])
 
@@ -35,11 +36,8 @@ def _mark_paid_and_generate_receipt(appt: models.Appointment, db: Session):
     appt.payment_status = "paid"
     appt.status = models.AppointmentStatus.payment_verified
 
-    # Get settings for receipt
-    fee_row = db.query(models.SiteSetting).filter(
-        models.SiteSetting.key == "consultation_fee"
-    ).first()
-    fee = fee_row.value if fee_row else "500"
+    # Get current consultation fee from site settings (with proper default fallback)
+    fee = get_setting(db, "consultation_fee")
 
     # Use the T&C snapshot from booking time (not current settings)
     terms_html = appt.agreed_terms or ""
@@ -99,6 +97,12 @@ def phonepe_initiate(
 
     if appt.payment_status == "paid":
         raise HTTPException(status_code=400, detail="Payment already completed")
+    # If admin (or user) cancelled the booking, payment is not allowed.
+    if appt.status in ("cancelled", "completed"):
+        raise HTTPException(
+            status_code=400,
+            detail="This appointment has been cancelled and can no longer be paid for.",
+        )
 
     try:
         result = initiate_payment(
