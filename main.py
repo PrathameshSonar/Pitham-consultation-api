@@ -34,7 +34,7 @@ import models  # noqa: F401 — registers all models with Base
 from routers import (
     auth, appointments, users, documents, queries,
     recordings, user_lists, payments, analytics, admin_tools,
-    events, pitham, broadcasts,
+    events, pitham, broadcasts, feedback,
 )
 from routers import settings as settings_router  # renamed to avoid collision with config.settings
 
@@ -71,6 +71,8 @@ def _ensure_column(table: str, column: str, ddl: str):
 
 # Micro-migrations — keep idempotent
 _ensure_column("events", "is_featured", "is_featured BOOLEAN NOT NULL DEFAULT 0")
+_ensure_column("appointments", "reminder_24h_sent_at", "reminder_24h_sent_at DATETIME NULL")
+_ensure_column("appointments", "reminder_1h_sent_at", "reminder_1h_sent_at DATETIME NULL")
 
 
 def _purge_expired_one_time_tokens():
@@ -109,6 +111,16 @@ def _purge_expired_one_time_tokens():
 
 
 _purge_expired_one_time_tokens()
+
+
+# ── Reminder scheduler ────────────────────────────────────────────────────────
+# 5-minute background tick that emails + WhatsApps users 24h and 1h before
+# their scheduled appointment. Idempotent — safe under --reload.
+try:
+    from utils.reminders import start_reminder_scheduler
+    start_reminder_scheduler()
+except Exception as _e:
+    logger.error("Reminder scheduler init failed: %s", _e)
 
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -223,6 +235,7 @@ app.include_router(admin_tools.router)
 app.include_router(events.router)
 app.include_router(pitham.router)
 app.include_router(broadcasts.router)
+app.include_router(feedback.router)
 
 
 @app.get("/health")

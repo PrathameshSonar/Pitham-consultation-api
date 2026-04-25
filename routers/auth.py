@@ -110,6 +110,14 @@ def register(request: Request, response: Response, data: schemas.RegisterRequest
     db.commit()
     db.refresh(user)
 
+    # Best-effort: send verification email immediately on signup. Don't fail
+    # registration if mailer is misconfigured — user can request resend later.
+    if user.email:
+        try:
+            _send_verification_for(user, db)
+        except Exception as e:
+            logger.warning("Auto verification email failed for user_id=%s: %s", user.id, e)
+
     token = create_token({"sub": str(user.id), "role": user.role})
     set_auth_cookie(response, token)
     return {"token": token, "role": user.role, "name": user.name}
@@ -300,6 +308,86 @@ def delete_account(
     return {"message": "Account deleted"}
 
 
+# ── DPDP: download my data ───────────────────────────────────────────────────
+
+@router.get("/account/export")
+def export_my_data(
+    user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Returns a JSON dump of everything personal we hold for this user.
+    Required by DPDP / GDPR-style "right to access". Excludes hashed_password
+    and any internal-only fields, includes appointments, queries, documents,
+    recordings, list memberships, notification prefs."""
+    appts = db.query(models.Appointment).filter(models.Appointment.user_id == user.id).all()
+    docs = db.query(models.Document).filter(models.Document.user_id == user.id).all()
+    queries = db.query(models.Query).filter(models.Query.user_id == user.id).all()
+    recordings = db.query(models.Recording).filter(models.Recording.user_id == user.id).all()
+    list_memberships = (
+        db.query(models.UserListMember).filter(models.UserListMember.user_id == user.id).all()
+    )
+
+    def _iso(dt):
+        return dt.isoformat() if dt else None
+
+    return {
+        "exported_at": datetime.utcnow().isoformat() + "Z",
+        "profile": {
+            "id": user.id,
+            "name": user.name,
+            "email": user.email,
+            "mobile": user.mobile,
+            "dob": user.dob,
+            "tob": user.tob,
+            "birth_place": user.birth_place,
+            "city": user.city,
+            "state": user.state,
+            "country": user.country,
+            "role": user.role,
+            "email_verified": user.email_verified,
+            "notify_email": user.notify_email,
+            "notify_sms": user.notify_sms,
+            "created_at": _iso(user.created_at),
+        },
+        "appointments": [
+            {
+                "id": a.id,
+                "name": a.name,
+                "email": a.email,
+                "mobile": a.mobile,
+                "dob": a.dob,
+                "tob": a.tob,
+                "birth_place": a.birth_place,
+                "problem": a.problem,
+                "status": a.status,
+                "payment_status": a.payment_status,
+                "payment_reference": a.payment_reference,
+                "scheduled_date": a.scheduled_date,
+                "scheduled_time": a.scheduled_time,
+                "zoom_link": a.zoom_link,
+                "agreed_terms": a.agreed_terms,
+                "created_at": _iso(a.created_at),
+            }
+            for a in appts
+        ],
+        "documents": [
+            {"id": d.id, "title": d.title, "description": d.description, "file_path": d.file_path, "created_at": _iso(d.created_at)}
+            for d in docs
+        ],
+        "queries": [
+            {"id": q.id, "subject": q.subject, "message": q.message, "reply": q.reply, "status": q.status, "created_at": _iso(q.created_at)}
+            for q in queries
+        ],
+        "recordings": [
+            {"id": r.id, "title": r.title, "zoom_recording_url": r.zoom_recording_url, "appointment_id": r.appointment_id, "created_at": _iso(r.created_at)}
+            for r in recordings
+        ],
+        "list_memberships": [
+            {"user_list_id": m.user_list_id} for m in list_memberships
+        ],
+    }
+
+
 # ── Notification Preferences ──────────────────────────────────────────────────
 
 class NotificationPrefsRequest(BaseModel):
@@ -323,15 +411,10 @@ def update_notification_prefs(
 
 # ── Email Verification ───────────────────────────────────────────────────────
 
-@router.post("/send-verification")
-@limiter.limit("3/minute")
-def send_verification_email(request: Request, user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.email_verified:
-        return {"message": "Email already verified"}
-    if not user.email:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=400, detail="No email on account")
 
+def _send_verification_for(user: models.User, db: Session) -> None:
+    """Mint a one-time verification token, persist it, and email the link.
+    Raises if the email send fails — caller decides whether to swallow."""
     token = secrets.token_urlsafe(32)
     expiry = (datetime.utcnow() + timedelta(hours=24)).isoformat()
     db.merge(models.SiteSetting(key=f"verify:{token}", value=f"{user.id}:{expiry}"))
@@ -358,6 +441,17 @@ def send_verification_email(request: Request, user: models.User = Depends(get_cu
         </div>
         """,
     )
+
+
+@router.post("/send-verification")
+@limiter.limit("3/minute")
+def send_verification_email(request: Request, user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user.email_verified:
+        return {"message": "Email already verified"}
+    if not user.email:
+        raise HTTPException(status_code=400, detail="No email on account")
+
+    _send_verification_for(user, db)
     return {"message": "Verification email sent"}
 
 

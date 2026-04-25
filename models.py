@@ -68,6 +68,8 @@ class Appointment(Base):
     recording_link = Column(String(500), nullable=True)      # zoom recording or video link
     receipt_path = Column(String(500), nullable=True)        # booking confirmation PDF
     agreed_terms = Column(Text, nullable=True)               # T&C snapshot at booking time
+    reminder_24h_sent_at = Column(DateTime, nullable=True)
+    reminder_1h_sent_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -162,6 +164,18 @@ class AuditLog(Base):
     entity_type = Column(String(50), nullable=True)      # e.g. "appointment", "document", "user"
     entity_id = Column(Integer, nullable=True)
     details = Column(Text, nullable=True)                # JSON or plain text
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class ConsultationFeedback(Base):
+    """User-submitted feedback for a completed consultation."""
+    __tablename__ = "consultation_feedback"
+
+    id = Column(Integer, primary_key=True, index=True)
+    appointment_id = Column(Integer, ForeignKey("appointments.id"), nullable=False, unique=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    rating = Column(Integer, nullable=False)  # 1-5
+    comment = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 

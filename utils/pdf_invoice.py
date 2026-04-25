@@ -8,6 +8,8 @@ import os
 from datetime import datetime
 from fpdf import FPDF
 
+from utils.pdf_receipt import _html_to_plain, _write_rich_text
+
 INVOICE_DIR = "uploads/invoices"
 os.makedirs(INVOICE_DIR, exist_ok=True)
 
@@ -21,6 +23,7 @@ def generate_invoice(
     fee: str,
     booked_on: str,
     invoice_number: str = "",
+    consultation_terms: str = "",
 ) -> str:
     """
     Generate a payment invoice PDF and return the file path.
@@ -128,8 +131,35 @@ def generate_invoice(
         pdf.cell(0, 6, f"Transaction Reference: {payment_reference}", new_x="LMARGIN", new_y="NEXT")
     pdf.cell(0, 6, f"Booking ID: SPBSP-{appointment_id}", new_x="LMARGIN", new_y="NEXT")
 
+    # ── Terms & Conditions ──
+    pdf.ln(8)
+    pdf.set_draw_color(200, 160, 80)
+    pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+    pdf.ln(6)
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_font("Helvetica", "B", 13)
+    pdf.set_text_color(123, 30, 30)
+    pdf.cell(0, 8, "Terms & Conditions", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(2)
+
+    if consultation_terms:
+        plain = _html_to_plain(consultation_terms)
+        _write_rich_text(pdf, plain)
+    else:
+        pdf.set_font("Helvetica", "", 9)
+        pdf.multi_cell(0, 5, (
+            "1. Shri Pitambara Baglamukhi Shakti Pitham, Ahilyanagar (SPBSP) provides astrology and spiritual consultation by "
+            "Shri Mayuresh Guruji Vispute via Zoom.\n"
+            "2. Full payment is required before scheduling. Payments are non-refundable.\n"
+            "3. Your personal information is kept strictly confidential.\n"
+            "4. Astrological guidance is for spiritual purposes only.\n"
+            "5. All content is intellectual property of SPBSP, Ahilyanagar.\n"
+            "6. SPBSP, Ahilyanagar's liability is limited to the consultation fee paid."
+        ))
+
     # ── Footer ──
-    pdf.ln(16)
+    pdf.ln(8)
     pdf.set_draw_color(200, 160, 80)
     pdf.line(10, pdf.get_y(), 200, pdf.get_y())
     pdf.ln(4)

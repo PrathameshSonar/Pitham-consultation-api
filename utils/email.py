@@ -102,8 +102,10 @@ def send_booking_confirmation(to: str, name: str, booking_id: int, fee: str, rec
     )
 
 
-def send_appointment_confirmation(to: str, name: str, scheduled_date: str, scheduled_time: str, zoom_link: str, mobile: str = ""):
-    """Sent when admin assigns a time slot. Also fires WhatsApp if `mobile` is supplied."""
+def send_appointment_confirmation(to: str, name: str, scheduled_date: str, scheduled_time: str, zoom_link: str, mobile: str = "", appointment_id: int | None = None):
+    """Sent when admin assigns a time slot. Also fires WhatsApp if `mobile` is supplied.
+    Attaches an .ics calendar invite so the user can add the event to their calendar
+    in one tap from Gmail / Apple Mail / Outlook."""
     subject = f"Consultation Scheduled — {BRAND}"
     body = _wrap_html(f"""
     <h3>Namaste {name},</h3>
@@ -116,9 +118,29 @@ def send_appointment_confirmation(to: str, name: str, scheduled_date: str, sched
       </table>
     </div>
     <p>Please join the Zoom meeting <strong>5 minutes before</strong> the scheduled time.</p>
+    <p>A calendar invite (.ics) is attached — open it on your phone to add the meeting to your calendar.</p>
     <p style="margin-top:24px">Regards,<br><strong>{BRAND}</strong></p>
     """)
-    send_email(to, subject, body)
+
+    attachments: list[str] = []
+    if appointment_id is not None:
+        try:
+            from utils.ics import generate_ics
+            ics_path = generate_ics(
+                appointment_id=appointment_id,
+                summary=f"Consultation with Shri Mayuresh Guruji ({BRAND_SHORT})",
+                description=f"Online consultation via Zoom.\nMeeting link: {zoom_link}",
+                location=zoom_link or "Zoom",
+                scheduled_date=scheduled_date,
+                scheduled_time=scheduled_time,
+                attendee_email=to,
+            )
+            if ics_path:
+                attachments.append(ics_path)
+        except Exception as e:
+            logger.warning("ics generation failed for appt=%s: %s", appointment_id, e)
+
+    send_email(to, subject, body, attachments)
     send_whatsapp(
         mobile,
         f"🙏 {name}, your consultation with Guruji is scheduled for {scheduled_date} at {scheduled_time}.\n"

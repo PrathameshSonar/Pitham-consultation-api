@@ -310,6 +310,7 @@ def user_generate_invoice(
         raise HTTPException(status_code=400, detail="Payment not verified yet")
 
     fee = get_setting(db, "consultation_fee")
+    terms_html = appt.agreed_terms or get_setting(db, "consultation_terms") or ""
 
     invoice_path = generate_invoice(
         appointment_id=appt.id,
@@ -319,6 +320,7 @@ def user_generate_invoice(
         payment_reference=appt.payment_reference or "",
         fee=fee,
         booked_on=appt.created_at.strftime("%d %B %Y") if appt.created_at else "",
+        consultation_terms=terms_html,
     )
     return {"message": "Invoice generated", "invoice_path": invoice_path}
 
@@ -387,6 +389,7 @@ def assign_slot(
             scheduled_date=data.scheduled_date,
             scheduled_time=data.scheduled_time,
             zoom_link=data.zoom_link,
+            appointment_id=appt.id,
         )
     return {"message": "Slot assigned and email sent"}
 
@@ -615,6 +618,7 @@ def admin_generate_invoice(
         raise HTTPException(status_code=404, detail="Appointment not found")
 
     fee = get_setting(db, "consultation_fee")
+    terms_html = appt.agreed_terms or get_setting(db, "consultation_terms") or ""
 
     invoice_path = generate_invoice(
         appointment_id=appt.id,
@@ -624,6 +628,7 @@ def admin_generate_invoice(
         payment_reference=appt.payment_reference or "",
         fee=fee,
         booked_on=appt.created_at.strftime("%d %B %Y") if appt.created_at else "",
+        consultation_terms=terms_html,
     )
     return {"message": "Invoice generated", "invoice_path": invoice_path}
 
@@ -660,6 +665,7 @@ def admin_download_invoices(
         raise HTTPException(status_code=404, detail="No paid appointments found in this date range.")
 
     fee = get_setting(db, "consultation_fee")
+    fallback_terms = get_setting(db, "consultation_terms") or ""
 
     # Generate all invoices and zip them
     zip_buffer = io.BytesIO()
@@ -673,6 +679,7 @@ def admin_download_invoices(
                 payment_reference=appt.payment_reference or "",
                 fee=fee,
                 booked_on=appt.created_at.strftime("%d %B %Y") if appt.created_at else "",
+                consultation_terms=appt.agreed_terms or fallback_terms,
             )
             filename = f"invoice_{appt.id}_{appt.name.replace(' ', '_')}.pdf"
             zf.write(invoice_path, filename)
