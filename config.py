@@ -191,6 +191,13 @@ class SentryConfig:
 class StorageConfig:
     driver: str = field(default_factory=lambda: _env("STORAGE_DRIVER", "local").lower())
     local_upload_dir: str = field(default_factory=lambda: _env("LOCAL_UPLOAD_DIR", "uploads"))
+    # S3 / S3-compatible (R2, Spaces, Backblaze B2)
+    s3_bucket: str = field(default_factory=lambda: _env("S3_BUCKET", ""))
+    s3_region: str = field(default_factory=lambda: _env("S3_REGION", "auto"))
+    s3_endpoint_url: str = field(default_factory=lambda: _env("S3_ENDPOINT_URL", ""))   # blank = AWS default
+    s3_access_key: str = field(default_factory=lambda: _env("S3_ACCESS_KEY_ID", ""))
+    s3_secret_key: str = field(default_factory=lambda: _env("S3_SECRET_ACCESS_KEY", ""))
+    s3_public_base_url: str = field(default_factory=lambda: _env("S3_PUBLIC_BASE_URL", ""))   # CDN or bucket URL
 
 
 # ─────────────────────────────────────────────────────────────────────────────

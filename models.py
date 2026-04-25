@@ -198,6 +198,31 @@ class Testimonial(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class Broadcast(Base):
+    """Admin/moderator-authored notification sent to all users or a specific user list.
+    Optionally carries an image attachment. Each user tracks their own read state via
+    BroadcastRead (no row = unread)."""
+    __tablename__ = "broadcasts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(200), nullable=False)
+    message = Column(Text, nullable=False)
+    image_path = Column(String(500), nullable=True)
+    target_type = Column(String(10), nullable=False, default="all")   # "all" | "list"
+    target_list_id = Column(Integer, ForeignKey("user_lists.id"), nullable=True)
+    sent_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class BroadcastRead(Base):
+    """Per-user read receipt for a broadcast. Presence = read."""
+    __tablename__ = "broadcast_reads"
+
+    broadcast_id = Column(Integer, ForeignKey("broadcasts.id", ondelete="CASCADE"), primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    read_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class PithamMedia(Base):
     """Banners, videos/podcasts, and Instagram posts shown on the public /pitham page."""
     __tablename__ = "pitham_media"

@@ -34,7 +34,7 @@ import models  # noqa: F401 — registers all models with Base
 from routers import (
     auth, appointments, users, documents, queries,
     recordings, user_lists, payments, analytics, admin_tools,
-    events, pitham,
+    events, pitham, broadcasts,
 )
 from routers import settings as settings_router  # renamed to avoid collision with config.settings
 
@@ -196,8 +196,17 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 
 # ── Static file serving ──────────────────────────────────────────────────────
+# Filenames are unique (uuid suffix), so we can safely tell browsers to cache
+# uploaded images for a year. Reduces repeat-load bandwidth dramatically.
+class _CachedStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        if response.status_code == 200:
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
+
 os.makedirs("uploads", exist_ok=True)
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+app.mount("/uploads", _CachedStaticFiles(directory="uploads"), name="uploads")
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(auth.router)
@@ -213,6 +222,7 @@ app.include_router(analytics.router)
 app.include_router(admin_tools.router)
 app.include_router(events.router)
 app.include_router(pitham.router)
+app.include_router(broadcasts.router)
 
 
 @app.get("/health")

@@ -311,6 +311,26 @@ class PithamMediaOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+# ── Broadcasts ───────────────────────────────────────────────────────────────
+
+class BroadcastOut(BaseModel):
+    id: int
+    title: str
+    message: str
+    image_path: Optional[str] = None
+    target_type: str
+    target_list_id: Optional[int] = None
+    sent_by_name: Optional[str] = None
+    created_at: datetime
+    is_read: bool = False           # set per-user when fetched via /broadcasts/my
+
+    model_config = {"from_attributes": True}
+
+
+class UnreadCount(BaseModel):
+    count: int
+
+
 # ── Pitham CMS bundle (single public fetch) ──────────────────────────────────
 
 class PithamCmsBundle(BaseModel):
