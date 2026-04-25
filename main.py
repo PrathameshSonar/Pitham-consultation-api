@@ -71,8 +71,8 @@ def _ensure_column(table: str, column: str, ddl: str):
 
 # Micro-migrations — keep idempotent
 _ensure_column("events", "is_featured", "is_featured BOOLEAN NOT NULL DEFAULT 0")
-_ensure_column("appointments", "reminder_24h_sent_at", "reminder_24h_sent_at DATETIME NULL")
-_ensure_column("appointments", "reminder_1h_sent_at", "reminder_1h_sent_at DATETIME NULL")
+_ensure_column("appointments", "reminder_24h_sent_at", "reminder_24h_sent_at TIMESTAMP NULL")
+_ensure_column("appointments", "reminder_1h_sent_at", "reminder_1h_sent_at TIMESTAMP NULL")
 
 
 def _purge_expired_one_time_tokens():
