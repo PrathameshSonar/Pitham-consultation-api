@@ -1,4 +1,5 @@
-from pydantic import BaseModel, EmailStr
+import json
+from pydantic import BaseModel, EmailStr, field_validator
 from typing import Optional
 from datetime import datetime
 
@@ -32,9 +33,27 @@ class TokenResponse(BaseModel):
     token: str
     role: str
     name: str
+    permissions: list[str] = []   # mirror of UserOut.permissions for client-side gating
 
 
 # ── User / Profile ────────────────────────────────────────────────────────────
+
+class UserLookupOut(BaseModel):
+    """Minimal user info for cross-section name/email/city resolution.
+    Returned by /admin/users/lookup — accessible to any admin/moderator so the
+    docs / recordings / broadcasts / user-lists / appointments panels can
+    display human-readable names without granting access to the full users
+    section (which exposes DOB/TOB/birth_place — sensitive consultation data).
+    """
+    id: int
+    name: str
+    email: Optional[str] = None
+    mobile: str
+    city: Optional[str] = None
+    state: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
 
 class UserOut(BaseModel):
     id: int
@@ -48,9 +67,29 @@ class UserOut(BaseModel):
     state: str
     country: str
     role: str
+    permissions: list[str] = []   # admin section keys; only meaningful for role=="moderator"
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @field_validator("permissions", mode="before")
+    @classmethod
+    def _decode_permissions(cls, v):
+        """The `permissions` column is stored as a JSON-encoded string in the
+        DB. Decode it transparently when the schema is built from an ORM row,
+        but also accept already-decoded lists (so the schema is symmetric for
+        request bodies and re-validation passes)."""
+        if v is None or v == "":
+            return []
+        if isinstance(v, list):
+            return v
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v)
+            except (TypeError, ValueError):
+                return []
+            return parsed if isinstance(parsed, list) else []
+        return []
 
 
 # ── Appointment ───────────────────────────────────────────────────────────────
@@ -218,6 +257,7 @@ class EventCreate(BaseModel):
     event_date: str                         # ISO date "YYYY-MM-DD"
     event_time: Optional[str] = None        # "HH:MM"
     location: Optional[str] = None
+    location_map_url: Optional[str] = None
     image_url: Optional[str] = None
     is_featured: Optional[bool] = False
 
@@ -228,6 +268,7 @@ class EventUpdate(BaseModel):
     event_date: Optional[str] = None
     event_time: Optional[str] = None
     location: Optional[str] = None
+    location_map_url: Optional[str] = None
     image_url: Optional[str] = None
     is_featured: Optional[bool] = None
 
@@ -239,6 +280,7 @@ class EventOut(BaseModel):
     event_date: str
     event_time: Optional[str] = None
     location: Optional[str] = None
+    location_map_url: Optional[str] = None
     image_url: Optional[str] = None
     is_featured: bool = False
     created_at: datetime

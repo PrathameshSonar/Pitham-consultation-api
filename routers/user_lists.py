@@ -6,7 +6,10 @@ from database import get_db
 import models
 import schemas
 from utils.auth import require_admin
+from utils.permissions import require_section
 from utils.audit import log_action
+
+_section_admin = require_section("user_lists")
 
 router = APIRouter(prefix="/admin/user-lists", tags=["user-lists"])
 
@@ -25,7 +28,7 @@ def _to_out(ul: models.UserList) -> dict:
 @router.post("", response_model=schemas.UserListOut)
 def create_list(
     data: schemas.UserListCreate,
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     ul = models.UserList(
@@ -47,7 +50,7 @@ def create_list(
 
 @router.get("", response_model=List[schemas.UserListOut])
 def list_lists(
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     lists = db.query(models.UserList).order_by(models.UserList.created_at.desc()).all()
@@ -58,7 +61,7 @@ def list_lists(
 def update_list(
     list_id: int,
     data: schemas.UserListUpdate,
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     ul = db.query(models.UserList).filter(models.UserList.id == list_id).first()
@@ -77,7 +80,7 @@ def update_list(
 def update_members(
     list_id: int,
     data: schemas.UserListMembersUpdate,
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     ul = db.query(models.UserList).filter(models.UserList.id == list_id).first()
@@ -99,7 +102,7 @@ def update_members(
 @router.delete("/{list_id}")
 def delete_list(
     list_id: int,
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     ul = db.query(models.UserList).filter(models.UserList.id == list_id).first()

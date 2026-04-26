@@ -120,7 +120,8 @@ def register(request: Request, response: Response, data: schemas.RegisterRequest
 
     token = create_token({"sub": str(user.id), "role": user.role})
     set_auth_cookie(response, token)
-    return {"token": token, "role": user.role, "name": user.name}
+    from utils.permissions import get_user_permissions
+    return {"token": token, "role": user.role, "name": user.name, "permissions": get_user_permissions(user)}
 
 
 # ── Login ────────────────────────────────────────────────────────────────────
@@ -145,7 +146,8 @@ def login(request: Request, response: Response, data: schemas.LoginRequest, db: 
 
     token = create_token({"sub": str(user.id), "role": user.role})
     set_auth_cookie(response, token)
-    return {"token": token, "role": user.role, "name": user.name}
+    from utils.permissions import get_user_permissions
+    return {"token": token, "role": user.role, "name": user.name, "permissions": get_user_permissions(user)}
 
 
 # ── Google Login ─────────────────────────────────────────────────────────────
@@ -196,7 +198,8 @@ def google_login(request: Request, response: Response, data: schemas.GoogleLogin
 
     token = create_token({"sub": str(user.id), "role": user.role})
     set_auth_cookie(response, token)
-    return {"token": token, "role": user.role, "name": user.name}
+    from utils.permissions import get_user_permissions
+    return {"token": token, "role": user.role, "name": user.name, "permissions": get_user_permissions(user)}
 
 
 # ── Logout — clears the auth cookie (Bearer clients can just drop their token) ─

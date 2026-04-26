@@ -21,7 +21,6 @@ if settings.sentry.is_configured():
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -34,7 +33,7 @@ import models  # noqa: F401 — registers all models with Base
 from routers import (
     auth, appointments, users, documents, queries,
     recordings, user_lists, payments, analytics, admin_tools,
-    events, pitham, broadcasts, feedback,
+    events, pitham, broadcasts, feedback, files,
 )
 from routers import settings as settings_router  # renamed to avoid collision with config.settings
 
@@ -71,8 +70,60 @@ def _ensure_column(table: str, column: str, ddl: str):
 
 # Micro-migrations — keep idempotent
 _ensure_column("events", "is_featured", "is_featured BOOLEAN NOT NULL DEFAULT 0")
+_ensure_column("events", "location_map_url", "location_map_url VARCHAR(500) NULL")
 _ensure_column("appointments", "reminder_24h_sent_at", "reminder_24h_sent_at TIMESTAMP NULL")
 _ensure_column("appointments", "reminder_1h_sent_at", "reminder_1h_sent_at TIMESTAMP NULL")
+# MySQL <8.0.13 rejects DEFAULT literals on TEXT/BLOB columns, so we add the
+# column NULLABLE and let the backfill below normalise existing rows to '[]'.
+_ensure_column("users", "permissions", "permissions TEXT NULL")
+
+
+def _backfill_user_permissions():
+    """Two jobs in one pass:
+
+    1. Replace NULL/empty `permissions` values with the canonical "[]" so JSON
+       parsers and the UI never see an empty string.
+    2. For existing moderators (created before RBAC), grant the full section
+       set so deploys don't silently lock them out — super admin can dial back
+       per-user from the team UI.
+
+    Both steps are idempotent and tolerant of a missing column (e.g. if the
+    earlier _ensure_column call raised, we don't want a second exception
+    here to abort startup)."""
+    try:
+        from sqlalchemy.orm import Session
+        from database import SessionLocal
+        from utils.permissions import ADMIN_SECTIONS, serialize_permissions
+
+        db: Session = SessionLocal()
+        try:
+            # Step 1: normalise NULLs / empty strings to "[]"
+            normalised = (
+                db.query(models.User)
+                .filter((models.User.permissions == None) | (models.User.permissions == ""))
+                .update({models.User.permissions: "[]"}, synchronize_session=False)
+            )
+
+            # Step 2: backfill existing moderators with the full section set
+            full = serialize_permissions(ADMIN_SECTIONS)
+            promoted = (
+                db.query(models.User)
+                .filter(models.User.role == "moderator", models.User.permissions == "[]")
+                .update({models.User.permissions: full}, synchronize_session=False)
+            )
+
+            if normalised or promoted:
+                db.commit()
+                logger.info(
+                    "Permissions backfill: normalised=%d, granted-full=%d", normalised, promoted
+                )
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error("Permissions backfill failed: %s", e)
+
+
+_backfill_user_permissions()
 
 
 def _purge_expired_one_time_tokens():
@@ -136,6 +187,50 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
+# ── Origin check middleware (CSRF defense for samesite=none cookies) ─────────
+# In production the auth cookie is samesite="none" so it can flow on
+# cross-site sub-resource requests (file proxy, frontend hosted on a different
+# registrable domain). That re-opens CSRF for unpreflighted form/multipart
+# POSTs from attacker-controlled pages. CORS only blocks XHR replays, not
+# `<form action="…/admin/…">`. This middleware closes that gap by rejecting
+# state-changing requests whose Origin/Referer doesn't match an allowed origin.
+
+from urllib.parse import urlparse
+
+
+class OriginCheckMiddleware(BaseHTTPMiddleware):
+    STATE_CHANGING = {"POST", "PUT", "PATCH", "DELETE"}
+
+    def __init__(self, app, allowed_origins: set[str]):
+        super().__init__(app)
+        # Normalise once so we don't pay the .rstrip cost per request.
+        self.allowed_origins = {o.rstrip("/") for o in allowed_origins if o}
+
+    async def dispatch(self, request: Request, call_next):
+        if request.method not in self.STATE_CHANGING:
+            return await call_next(request)
+
+        origin = (request.headers.get("origin") or "").rstrip("/")
+        if origin:
+            if origin not in self.allowed_origins:
+                return JSONResponse(status_code=403, content={"detail": "Origin not allowed"})
+        else:
+            # No Origin header — most commonly server-to-server, healthchecks,
+            # or non-browser clients. Fall back to Referer if present; otherwise
+            # allow (Bearer-token clients, curl, internal callers don't ship
+            # Origin and shouldn't be blocked here).
+            referer = request.headers.get("referer") or ""
+            if referer:
+                try:
+                    p = urlparse(referer)
+                    referer_origin = f"{p.scheme}://{p.netloc}".rstrip("/")
+                    if referer_origin not in self.allowed_origins:
+                        return JSONResponse(status_code=403, content={"detail": "Referer not allowed"})
+                except Exception:
+                    pass
+        return await call_next(request)
+
+
 # ── Security headers middleware ───────────────────────────────────────────────
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
@@ -152,6 +247,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(SecurityHeadersMiddleware)
+
+# Origin check runs after CORS so that legitimate cross-origin fetches (which
+# CORS already validates) reach this layer with their Origin header populated.
+app.add_middleware(OriginCheckMiddleware, allowed_origins={settings.core.frontend_url})
 
 
 # ── Admin rate limit middleware ──────────────────────────────────────────────
@@ -207,18 +306,12 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
 
 
-# ── Static file serving ──────────────────────────────────────────────────────
-# Filenames are unique (uuid suffix), so we can safely tell browsers to cache
-# uploaded images for a year. Reduces repeat-load bandwidth dramatically.
-class _CachedStaticFiles(StaticFiles):
-    async def get_response(self, path: str, scope):
-        response = await super().get_response(path, scope)
-        if response.status_code == 200:
-            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
-        return response
-
+# ── File serving ──────────────────────────────────────────────────────────────
+# Replaced the prior public StaticFiles mount with an auth-aware proxy router
+# (routers/files.py). Public CMS assets (uploads/pitham/*) still require no
+# auth and get long-cache headers; personal files (documents, selfies, analysis,
+# receipts, invoices) require authentication AND ownership.
 os.makedirs("uploads", exist_ok=True)
-app.mount("/uploads", _CachedStaticFiles(directory="uploads"), name="uploads")
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(auth.router)
@@ -236,6 +329,7 @@ app.include_router(events.router)
 app.include_router(pitham.router)
 app.include_router(broadcasts.router)
 app.include_router(feedback.router)
+app.include_router(files.router)
 
 
 @app.get("/health")

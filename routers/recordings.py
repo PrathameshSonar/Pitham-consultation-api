@@ -7,7 +7,10 @@ from database import get_db
 import models
 import schemas
 from utils.auth import get_current_user, require_admin
+from utils.permissions import require_section
 from utils.audit import log_action
+
+_section_admin = require_section("recordings")
 
 router = APIRouter(tags=["recordings"])
 
@@ -34,7 +37,7 @@ def add_recording(
     title: str = Form(...),
     zoom_recording_url: str = Form(...),
     appointment_id: Optional[int] = Form(None),
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     target_user = db.query(models.User).filter(models.User.id == user_id).first()
@@ -58,7 +61,7 @@ def add_recording(
 @router.post("/admin/recordings/bulk-assign", response_model=BulkAssignRecordingResponse)
 def bulk_assign_recording(
     data: BulkAssignRecordingRequest,
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     if not data.title or not data.recording_url:
@@ -106,7 +109,7 @@ def bulk_assign_recording(
 @router.delete("/admin/recordings/{rec_id}")
 def delete_recording(
     rec_id: int,
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     rec = db.query(models.Recording).filter(models.Recording.id == rec_id).first()
@@ -123,7 +126,7 @@ def delete_recording(
 
 @router.get("/admin/recordings", response_model=List[schemas.RecordingOut])
 def admin_all_recordings(
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     return db.query(models.Recording).order_by(models.Recording.created_at.desc()).all()

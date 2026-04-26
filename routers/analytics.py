@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from database import get_db
 import models
 from utils.auth import require_admin
+from utils.permissions import has_section_access, is_super_admin
 from utils.site_settings import get_consultation_fee
 
 router = APIRouter(prefix="/admin/analytics", tags=["analytics"])
@@ -113,29 +114,51 @@ def get_analytics(
     )
     revenue_per_month = [{"month": m, "count": c, "revenue": c * fee} for m, c in completed_monthly_raw]
 
-    return {
-        "totals": {
-            "users": total_users,
-            "appointments": total_appointments,
-            "documents": total_documents,
-            "recordings": total_recordings,
-            "queries": total_queries,
-        },
-        "recent_30d": {
-            "new_users": new_users_30d,
-            "new_appointments": new_appts_30d,
-            "completed": completed_30d,
-            "open_queries": open_queries,
-        },
-        "appointment_by_status": appointment_by_status,
-        "appointment_by_payment": appointment_by_payment,
-        "appointments_per_month": appointments_per_month,
-        "users_per_month": users_per_month,
-        "revenue": {
+    # Per-section visibility — moderators only see numbers they have access to.
+    # Counts are aggregate but we still hide them per-section to mirror the
+    # dashboard UI and avoid leaking activity volume across sections.
+    super_ = is_super_admin(admin)
+    can_appts   = super_ or has_section_access(admin, "appointments")
+    can_users   = super_ or has_section_access(admin, "users")
+    can_docs    = super_ or has_section_access(admin, "documents")
+    can_queries = super_ or has_section_access(admin, "queries")
+
+    totals: dict = {}
+    if can_users:    totals["users"] = total_users
+    if can_appts:    totals["appointments"] = total_appointments
+    if can_docs:     totals["documents"] = total_documents
+    if can_appts:    totals["recordings"] = total_recordings  # recordings tied to appts
+    if can_queries:  totals["queries"] = total_queries
+
+    recent_30d: dict = {}
+    if can_users:    recent_30d["new_users"] = new_users_30d
+    if can_appts:
+        recent_30d["new_appointments"] = new_appts_30d
+        recent_30d["completed"] = completed_30d
+    if can_queries:  recent_30d["open_queries"] = open_queries
+
+    payload: dict = {
+        "totals": totals,
+        "recent_30d": recent_30d,
+    }
+
+    # Charts gated by section. Frontend tolerates missing keys (already gated
+    # on the dashboard), but absent sections also save bytes for moderators.
+    if can_appts:
+        payload["appointment_by_status"] = appointment_by_status
+        payload["appointment_by_payment"] = appointment_by_payment
+        payload["appointments_per_month"] = appointments_per_month
+    if can_users:
+        payload["users_per_month"] = users_per_month
+
+    # Financial data is super-admin-only.
+    if super_:
+        payload["revenue"] = {
             "total": total_revenue,
             "total_completed": total_completed,
             "total_hours": round(total_hours, 1),
             "fee_per_consultation": fee,
-        },
-        "revenue_per_month": revenue_per_month,
-    }
+        }
+        payload["revenue_per_month"] = revenue_per_month
+
+    return payload

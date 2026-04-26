@@ -17,8 +17,12 @@ from database import get_db
 import models
 import schemas
 from utils.auth import require_super_admin
+from utils.permissions import require_section
 from utils.audit import log_action
 from utils.uploads import IMAGE_MIMES, validate_upload, check_size
+
+# Events are an admin facet of the Pitham CMS — share its section permission.
+_section_admin = require_section("pitham_cms")
 
 router = APIRouter(tags=["events"])
 
@@ -93,10 +97,11 @@ async def admin_create_event(
     description: str = Form(""),
     event_time: str = Form(""),
     location: str = Form(""),
+    location_map_url: str = Form(""),
     image_url: str = Form(""),
     is_featured: bool = Form(False),
     image: Optional[UploadFile] = File(None),
-    admin: models.User = Depends(require_super_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     if not title.strip():
@@ -117,6 +122,7 @@ async def admin_create_event(
         event_date=event_date,
         event_time=event_time.strip() or None,
         location=location.strip() or None,
+        location_map_url=location_map_url.strip() or None,
         image_url=final_image,
         is_featured=is_featured,
         created_by=admin.id,
@@ -132,7 +138,7 @@ async def admin_create_event(
 
 @router.get("/admin/events", response_model=List[schemas.EventOut])
 def admin_list_events(
-    admin: models.User = Depends(require_super_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     return (
@@ -152,10 +158,11 @@ async def admin_update_event(
     description: Optional[str] = Form(None),
     event_time: Optional[str] = Form(None),
     location: Optional[str] = Form(None),
+    location_map_url: Optional[str] = Form(None),
     image_url: Optional[str] = Form(None),
     is_featured: Optional[bool] = Form(None),
     image: Optional[UploadFile] = File(None),
-    admin: models.User = Depends(require_super_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     event = db.query(models.Event).filter(models.Event.id == event_id).first()
@@ -172,6 +179,8 @@ async def admin_update_event(
         event.event_time = event_time.strip() or None
     if location is not None:
         event.location = location.strip() or None
+    if location_map_url is not None:
+        event.location_map_url = location_map_url.strip() or None
     if is_featured is not None:
         event.is_featured = is_featured
 
@@ -201,7 +210,7 @@ async def admin_update_event(
 @router.delete("/admin/events/{event_id}")
 def admin_delete_event(
     event_id: int,
-    admin: models.User = Depends(require_super_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     event = db.query(models.Event).filter(models.Event.id == event_id).first()

@@ -59,14 +59,25 @@ def decode_token(token: str) -> dict:
 
 
 def set_auth_cookie(response: Response, token: str) -> None:
-    """Set the auth token as an httpOnly cookie. Use this on login/register/google success."""
+    """Set the auth token as an httpOnly cookie. Use this on login/register/google success.
+
+    SameSite policy:
+        - prod  → "none" with secure=True. Required so the cookie flows on
+                  cross-site sub-resource requests (e.g. <img src="…/uploads/…"> when
+                  frontend and backend live on different registrable domains).
+                  CSRF protection for state-changing requests is provided by the
+                  OriginCheckMiddleware in main.py rather than the cookie attribute.
+        - dev   → "lax". Local frontend (localhost:3000) and backend (localhost:8000)
+                  are same-site, "none" would also need secure=True which we don't
+                  have over plain HTTP, and "lax" gives us CSRF defense for free.
+    """
     response.set_cookie(
         key=COOKIE_NAME,
         value=token,
         max_age=ACCESS_TOKEN_EXPIRE_HOURS * 3600,
         httponly=True,
-        secure=IS_PROD,            # only over HTTPS in prod
-        samesite="lax",            # blocks most CSRF; same-site fetches still work
+        secure=IS_PROD,
+        samesite="none" if IS_PROD else "lax",
         path="/",
     )
 

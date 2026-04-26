@@ -27,7 +27,10 @@ from database import get_db
 import models
 import schemas
 from utils.auth import get_current_user, require_admin
+from utils.permissions import require_section
 from utils.audit import log_action
+
+_section_admin = require_section("documents")
 
 router = APIRouter(tags=["documents"])
 
@@ -44,7 +47,7 @@ async def upload_gallery_document(
     title: str = Form(...),
     description: str = Form(""),
     file: UploadFile = File(...),
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     content = await _validate_and_read(file)
@@ -69,7 +72,7 @@ async def upload_gallery_document(
 
 @router.get("/admin/documents/gallery", response_model=List[schemas.DocumentOut])
 def list_gallery_documents(
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     return (
@@ -83,7 +86,7 @@ def list_gallery_documents(
 @router.delete("/admin/documents/gallery/{doc_id}")
 def delete_gallery_document(
     doc_id: int,
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     doc = (
@@ -110,7 +113,7 @@ def delete_gallery_document(
 @router.post("/admin/documents/assign-from-gallery", response_model=schemas.DocumentOut)
 def assign_from_gallery(
     data: schemas.AssignFromGalleryRequest,
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     template = (
@@ -127,8 +130,11 @@ def assign_from_gallery(
         raise HTTPException(status_code=404, detail="User not found")
 
     # Copy the file so deletion of the gallery template won't affect the user's doc.
+    # Filename includes a random uuid hex so the URL isn't enumerable from
+    # neighbouring user/template ids alone — defense against /uploads being
+    # publicly served (every assigned doc has a per-copy unguessable component).
     orig_name = os.path.basename(template.file_path)
-    new_name  = f"{data.user_id}_{template.id}_{orig_name}"
+    new_name  = f"{data.user_id}_{template.id}_{uuid.uuid4().hex[:12]}_{orig_name}"
     new_path  = os.path.join(ASSIGNED_DIR, new_name)
     try:
         shutil.copyfile(template.file_path, new_path)
@@ -154,7 +160,7 @@ def assign_from_gallery(
 @router.post("/admin/documents/bulk-assign-gallery", response_model=schemas.BulkAssignResponse)
 def bulk_assign_from_gallery(
     data: schemas.BulkAssignRequest,
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     if not data.gallery_doc_id:
@@ -183,7 +189,7 @@ def bulk_assign_from_gallery(
             continue
         try:
             orig_name = os.path.basename(template.file_path)
-            new_name  = f"{uid}_{template.id}_{orig_name}"
+            new_name  = f"{uid}_{template.id}_{uuid.uuid4().hex[:12]}_{orig_name}"
             new_path  = os.path.join(ASSIGNED_DIR, new_name)
             shutil.copyfile(template.file_path, new_path)
 
@@ -217,7 +223,7 @@ async def bulk_upload_for_users(
     description: str = Form(""),
     batch_label: str = Form(""),
     file: UploadFile = File(...),
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     try:
@@ -285,7 +291,7 @@ async def upload_document(
     title: str = Form(...),
     description: str = Form(""),
     file: UploadFile = File(...),
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     target_user = db.query(models.User).filter(models.User.id == user_id).first()
@@ -315,7 +321,7 @@ async def upload_document(
 
 @router.get("/admin/documents", response_model=List[schemas.DocumentOut])
 def admin_list_documents(
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     return (
@@ -331,7 +337,7 @@ def admin_list_documents(
 @router.delete("/admin/documents/{doc_id}")
 def delete_assigned_document(
     doc_id: int,
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     doc = (

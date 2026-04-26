@@ -7,6 +7,9 @@ from database import get_db
 import models
 import schemas
 from utils.auth import get_current_user, require_admin
+from utils.permissions import require_section
+
+_section_admin = require_section("queries")
 
 router = APIRouter(tags=["queries"])
 
@@ -49,7 +52,7 @@ def my_queries(
 
 @router.get("/admin/queries", response_model=List[schemas.QueryOut])
 def admin_all_queries(
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     return db.query(models.Query).order_by(models.Query.created_at.desc()).all()
@@ -61,7 +64,7 @@ def admin_all_queries(
 def reply_to_query(
     query_id: int,
     data: schemas.QueryReply,
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     query = db.query(models.Query).filter(models.Query.id == query_id).first()

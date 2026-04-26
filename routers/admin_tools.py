@@ -14,6 +14,7 @@ from typing import Optional
 from database import get_db
 import models
 from utils.auth import require_admin, require_super_admin
+from utils.permissions import has_section_access, is_super_admin
 from utils.audit import log_action
 from utils.email import send_email
 from utils.site_settings import get_setting
@@ -97,43 +98,61 @@ def global_search(
     admin: models.User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
+    """Global search across users / appointments / documents.
+
+    Each result block is gated by the matching section permission so a
+    moderator never sees rows from a section they're not authorised for.
+    Empty arrays are returned (rather than 403) so the frontend can render
+    'no results' uniformly without distinguishing 'no match' from 'no perm'.
+    """
+    super_ = is_super_admin(admin)
+    can_users = super_ or has_section_access(admin, "users")
+    can_appts = super_ or has_section_access(admin, "appointments")
+    can_docs  = super_ or has_section_access(admin, "documents")
+
     term = f"%{q.strip()}%"
 
-    users = (
-        db.query(models.User)
-        .filter(
-            models.User.role == "user",
-            or_(
-                models.User.name.ilike(term),
-                models.User.email.ilike(term),
-                models.User.mobile.ilike(term),
-                models.User.city.ilike(term),
-            ),
+    users = []
+    if can_users:
+        users = (
+            db.query(models.User)
+            .filter(
+                models.User.role == "user",
+                or_(
+                    models.User.name.ilike(term),
+                    models.User.email.ilike(term),
+                    models.User.mobile.ilike(term),
+                    models.User.city.ilike(term),
+                ),
+            )
+            .limit(20)
+            .all()
         )
-        .limit(20)
-        .all()
-    )
 
-    appointments = (
-        db.query(models.Appointment)
-        .filter(
-            or_(
-                models.Appointment.name.ilike(term),
-                models.Appointment.email.ilike(term),
-                models.Appointment.mobile.ilike(term),
-                models.Appointment.problem.ilike(term),
-            ),
+    appointments = []
+    if can_appts:
+        appointments = (
+            db.query(models.Appointment)
+            .filter(
+                or_(
+                    models.Appointment.name.ilike(term),
+                    models.Appointment.email.ilike(term),
+                    models.Appointment.mobile.ilike(term),
+                    models.Appointment.problem.ilike(term),
+                ),
+            )
+            .limit(20)
+            .all()
         )
-        .limit(20)
-        .all()
-    )
 
-    documents = (
-        db.query(models.Document)
-        .filter(models.Document.title.ilike(term))
-        .limit(20)
-        .all()
-    )
+    documents = []
+    if can_docs:
+        documents = (
+            db.query(models.Document)
+            .filter(models.Document.title.ilike(term))
+            .limit(20)
+            .all()
+        )
 
     return {
         "users": [{"id": u.id, "name": u.name, "email": u.email, "mobile": u.mobile} for u in users],

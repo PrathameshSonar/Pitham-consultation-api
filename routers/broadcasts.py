@@ -15,7 +15,10 @@ from database import get_db
 import models
 import schemas
 from utils.auth import get_current_user, require_admin
+from utils.permissions import require_section
 from utils.audit import log_action
+
+_section_admin = require_section("broadcasts")
 from utils.storage import storage
 from utils.uploads import IMAGE_MIMES, validate_upload, check_size, safe_filename
 from utils.email import send_email
@@ -89,7 +92,7 @@ async def create_broadcast(
     target_type: str = Form("all"),                 # "all" | "list"
     target_list_id: Optional[int] = Form(None),
     image: Optional[UploadFile] = File(None),
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     if target_type not in ("all", "list"):
@@ -149,7 +152,7 @@ async def create_broadcast(
 
 @router.get("/admin/broadcasts", response_model=List[schemas.BroadcastOut])
 def list_admin_broadcasts(
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     rows = db.query(models.Broadcast).order_by(models.Broadcast.created_at.desc()).limit(200).all()
@@ -162,7 +165,7 @@ def list_admin_broadcasts(
 @router.delete("/admin/broadcasts/{bid}")
 def delete_broadcast(
     bid: int,
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     b = db.query(models.Broadcast).filter(models.Broadcast.id == bid).first()

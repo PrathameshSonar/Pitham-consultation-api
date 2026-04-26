@@ -19,8 +19,12 @@ from database import get_db
 import models
 import schemas
 from utils.auth import require_super_admin
+from utils.permissions import require_section
 from utils.audit import log_action
 from utils.uploads import IMAGE_MIMES, validate_upload, check_size, safe_filename as _shared_safe
+
+# Pitham CMS is now delegated by section permission rather than super-admin only.
+_section_admin = require_section("pitham_cms")
 
 router = APIRouter(tags=["pitham"])
 
@@ -99,7 +103,7 @@ def public_cms_bundle(db: Session = Depends(get_db)):
 @router.get("/admin/pitham/media", response_model=List[schemas.PithamMediaOut])
 def admin_list_media(
     kind: Optional[str] = Query(None),
-    admin: models.User = Depends(require_super_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     q = db.query(models.PithamMedia)
@@ -118,7 +122,7 @@ async def admin_create_media(
     sort_order: int = Form(0),
     is_active: bool = Form(True),
     image: Optional[UploadFile] = File(None),
-    admin: models.User = Depends(require_super_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     if kind not in ALLOWED_KINDS:
@@ -158,7 +162,7 @@ async def admin_update_media(
     sort_order: Optional[int] = Form(None),
     is_active: Optional[bool] = Form(None),
     image: Optional[UploadFile] = File(None),
-    admin: models.User = Depends(require_super_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     item = db.query(models.PithamMedia).filter(models.PithamMedia.id == item_id).first()
@@ -187,7 +191,7 @@ async def admin_update_media(
 @router.delete("/admin/pitham/media/{item_id}")
 def admin_delete_media(
     item_id: int,
-    admin: models.User = Depends(require_super_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     item = db.query(models.PithamMedia).filter(models.PithamMedia.id == item_id).first()
@@ -207,7 +211,7 @@ def admin_delete_media(
 
 @router.get("/admin/pitham/testimonials", response_model=List[schemas.TestimonialOut])
 def admin_list_testimonials(
-    admin: models.User = Depends(require_super_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     return (
@@ -225,7 +229,7 @@ async def admin_create_testimonial(
     sort_order: int = Form(0),
     is_active: bool = Form(True),
     photo: Optional[UploadFile] = File(None),
-    admin: models.User = Depends(require_super_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     if not name.strip() or not quote.strip():
@@ -260,7 +264,7 @@ async def admin_update_testimonial(
     sort_order: Optional[int] = Form(None),
     is_active: Optional[bool] = Form(None),
     photo: Optional[UploadFile] = File(None),
-    admin: models.User = Depends(require_super_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     t = db.query(models.Testimonial).filter(models.Testimonial.id == tid).first()
@@ -291,7 +295,7 @@ async def admin_update_testimonial(
 @router.delete("/admin/pitham/testimonials/{tid}")
 def admin_delete_testimonial(
     tid: int,
-    admin: models.User = Depends(require_super_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     t = db.query(models.Testimonial).filter(models.Testimonial.id == tid).first()

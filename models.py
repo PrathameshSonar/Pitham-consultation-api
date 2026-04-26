@@ -31,6 +31,11 @@ class User(Base):
     hashed_password = Column(String(255), nullable=True)   # null for Google-only users
     google_id = Column(String(100), unique=True, nullable=True)
     role = Column(String(20), default="user")         # "user" | "admin" | "moderator"
+    # JSON-encoded list of admin section keys (see utils/permissions.ADMIN_SECTIONS).
+    # Only consulted for moderators — super admins bypass at runtime.
+    # Nullable + ORM-side default because MySQL <8.0.13 rejects DEFAULT on TEXT
+    # columns; runtime helpers treat NULL as "[]".
+    permissions = Column(Text, nullable=True, default="[]")
     is_active = Column(Boolean, default=True)
     email_verified = Column(Boolean, default=False)
     notify_email = Column(Boolean, default=True)
@@ -189,6 +194,7 @@ class Event(Base):
     event_date = Column(String(20), nullable=False, index=True)   # ISO date, e.g. "2026-05-12"
     event_time = Column(String(20), nullable=True)                # e.g. "18:30"
     location = Column(String(200), nullable=True)
+    location_map_url = Column(String(500), nullable=True)         # Google Maps link for "navigate" button
     image_url = Column(String(500), nullable=True)                # external URL OR uploaded file path
     is_featured = Column(Boolean, default=False, nullable=False)  # admin-marked highlight
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)

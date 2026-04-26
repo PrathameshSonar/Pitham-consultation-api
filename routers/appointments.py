@@ -17,6 +17,11 @@ from database import get_db
 import models
 import schemas
 from utils.auth import get_current_user, require_admin, require_super_admin
+from utils.permissions import require_section
+
+# Section gate for every admin endpoint in this router. Adding a new admin
+# section is a one-line change in utils/permissions.ADMIN_SECTIONS.
+_section_admin = require_section("appointments")
 from utils.audit import log_action
 from utils.email import send_appointment_confirmation, send_reschedule_notification, send_completion_notification
 from utils.zoom import create_meeting as zoom_create_meeting, ZoomError
@@ -329,7 +334,7 @@ def user_generate_invoice(
 
 @router.get("/admin/appointments", response_model=List[schemas.AppointmentOut])
 def all_appointments(
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     return db.query(models.Appointment).order_by(models.Appointment.created_at.desc()).all()
@@ -341,7 +346,7 @@ def all_appointments(
 def verify_payment(
     appt_id: int,
     data: schemas.VerifyPaymentRequest,
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     appt = db.query(models.Appointment).filter(models.Appointment.id == appt_id).first()
@@ -361,7 +366,7 @@ def verify_payment(
 def assign_slot(
     appt_id: int,
     data: schemas.AssignSlotRequest,
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     appt = db.query(models.Appointment).filter(models.Appointment.id == appt_id).first()
@@ -400,7 +405,7 @@ def assign_slot(
 def reschedule(
     appt_id: int,
     data: schemas.RescheduleRequest,
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     appt = db.query(models.Appointment).filter(models.Appointment.id == appt_id).first()
@@ -442,7 +447,7 @@ async def mark_completed(
     recording_link: str = Form(""),
     gallery_doc_ids: str = Form(""),          # JSON array: "[1,2,3]"
     analysis_file: Optional[UploadFile] = File(None),
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     appt = db.query(models.Appointment).filter(models.Appointment.id == appt_id).first()
@@ -527,7 +532,7 @@ async def mark_completed(
 @router.delete("/admin/appointments/{appt_id}")
 def admin_cancel_appointment(
     appt_id: int,
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     appt = db.query(models.Appointment).filter(models.Appointment.id == appt_id).first()
@@ -570,7 +575,7 @@ def admin_cancel_appointment(
 @router.post("/admin/appointments/{appt_id}/generate-receipt")
 def admin_generate_receipt(
     appt_id: int,
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     from utils.pdf_receipt import generate_receipt
@@ -608,7 +613,7 @@ def admin_generate_receipt(
 @router.post("/admin/appointments/{appt_id}/generate-invoice")
 def admin_generate_invoice(
     appt_id: int,
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
     from utils.pdf_invoice import generate_invoice
@@ -699,7 +704,7 @@ def admin_download_invoices(
 @router.post("/admin/zoom/create-meeting", response_model=schemas.ZoomMeetingResponse)
 def create_zoom_meeting(
     data: schemas.CreateZoomMeetingRequest,
-    admin: models.User = Depends(require_admin),
+    admin: models.User = Depends(_section_admin),
 ):
     try:
         meeting = zoom_create_meeting(
