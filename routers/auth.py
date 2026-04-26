@@ -19,10 +19,11 @@ from database import get_db
 import models
 import schemas
 from utils.auth import (
-    hash_password, verify_password, create_token, get_current_user,
+    hash_password, verify_password, mint_user_token, get_current_user,
     set_auth_cookie, clear_auth_cookie,
 )
 from utils.email import send_email, send_password_reset_otp
+from utils.password_policy import validate_password
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 limiter = Limiter(key_func=get_remote_address)
@@ -83,8 +84,7 @@ def register(request: Request, response: Response, data: schemas.RegisterRequest
         raise HTTPException(status_code=400, detail="Email or mobile is required")
     if len(name) < 2:
         raise HTTPException(status_code=400, detail="Name is too short")
-    if len(data.password) < 6:
-        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    validate_password(data.password)
 
     if email:
         if db.query(models.User).filter(models.User.email == email).first():
@@ -118,7 +118,7 @@ def register(request: Request, response: Response, data: schemas.RegisterRequest
         except Exception as e:
             logger.warning("Auto verification email failed for user_id=%s: %s", user.id, e)
 
-    token = create_token({"sub": str(user.id), "role": user.role})
+    token = mint_user_token(user)
     set_auth_cookie(response, token)
     from utils.permissions import get_user_permissions
     return {"token": token, "role": user.role, "name": user.name, "permissions": get_user_permissions(user)}
@@ -144,7 +144,7 @@ def login(request: Request, response: Response, data: schemas.LoginRequest, db: 
     if not user or not user.hashed_password or not verify_password(data.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    token = create_token({"sub": str(user.id), "role": user.role})
+    token = mint_user_token(user)
     set_auth_cookie(response, token)
     from utils.permissions import get_user_permissions
     return {"token": token, "role": user.role, "name": user.name, "permissions": get_user_permissions(user)}
@@ -191,12 +191,21 @@ def google_login(request: Request, response: Response, data: schemas.GoogleLogin
             country="India",
             hashed_password=None,
             google_id=google_id,
+            # Google has already verified the email — skip our own loop so
+            # downstream gates (booking, password reset) work for OAuth users.
+            email_verified=True,
         )
         db.add(user)
         db.commit()
         db.refresh(user)
+    elif user.email and not user.email_verified:
+        # Existing user re-authenticating via Google: trust Google's verification
+        # for this email if it matches, so we don't keep them gated forever.
+        if email and user.email == email:
+            user.email_verified = True
+            db.commit()
 
-    token = create_token({"sub": str(user.id), "role": user.role})
+    token = mint_user_token(user)
     set_auth_cookie(response, token)
     from utils.permissions import get_user_permissions
     return {"token": token, "role": user.role, "name": user.name, "permissions": get_user_permissions(user)}
@@ -501,13 +510,26 @@ def forgot_password(request: Request, data: ForgotPasswordRequest, db: Session =
         raise HTTPException(status_code=400, detail="Email or mobile is required")
 
     user = None
+    matched_by_email = False
     if data.email:
         user = db.query(models.User).filter(models.User.email == data.email).first()
+        matched_by_email = bool(user)
     if not user and data.mobile:
         user = db.query(models.User).filter(models.User.mobile == data.mobile).first()
 
     if not user:
         # Don't reveal whether the user exists
+        return {"message": "If an account exists, a reset link has been sent."}
+
+    # Don't email a reset OTP to an unverified address — otherwise an attacker
+    # who registered an account with someone else's email can use the reset
+    # flow to harass the real owner. Mobile-side recovery is fine because
+    # mobile is verified at registration via the OTP (or Google sign-in).
+    if matched_by_email and not user.email_verified:
+        logger.info(
+            "Password reset blocked: email not verified user_id=%s", user.id
+        )
+        # Return the same generic response so we don't leak verification state.
         return {"message": "If an account exists, a reset link has been sent."}
 
     # Generate a 6-digit numeric OTP and store it (valid for 10 minutes)
@@ -532,8 +554,7 @@ def forgot_password(request: Request, data: ForgotPasswordRequest, db: Session =
 @router.post("/reset-password")
 @limiter.limit("5/minute")
 def reset_password(request: Request, data: ResetPasswordRequest, db: Session = Depends(get_db)):
-    if len(data.new_password) < 6:
-        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    validate_password(data.new_password)
 
     # OTPs are 6-digit numeric — reject malformed input early to keep brute-force surface small
     otp = (data.token or "").strip()
@@ -566,6 +587,9 @@ def reset_password(request: Request, data: ResetPasswordRequest, db: Session = D
         raise HTTPException(status_code=400, detail="User not found")
 
     user.hashed_password = hash_password(data.new_password)
+    # Revoke every outstanding session — any JWT minted before this point
+    # carries an older `pv` and will fail the check in get_current_user.
+    user.password_version = (user.password_version or 1) + 1
     db.delete(row)  # One-time use
     db.commit()
 

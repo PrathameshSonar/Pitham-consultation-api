@@ -66,7 +66,16 @@ def _maybe_user(request: Request, db: Session) -> Optional[models.User]:
         sub = payload.get("sub")
         if sub is None:
             return None
-        return db.query(models.User).filter(models.User.id == int(sub)).first()
+        user = db.query(models.User).filter(models.User.id == int(sub)).first()
+        if not user:
+            return None
+        # Mirror the password_version revocation check from get_current_user
+        # so a stale token cannot read protected files post-reset.
+        token_pv = int(payload.get("pv", 1) or 1)
+        user_pv = int(getattr(user, "password_version", 1) or 1)
+        if token_pv != user_pv:
+            return None
+        return user
     except Exception:
         return None
 

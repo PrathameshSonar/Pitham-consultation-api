@@ -121,6 +121,16 @@ async def book_appointment(
 ):
     _check_booking_allowed(db)
 
+    # Email-verification gate: if the account has an email on file, it must
+    # be verified before they can book. Mobile-only accounts (no email at
+    # all) and Google sign-ins (auto-verified) sail through. Keeps the
+    # consultation pipeline tied to a real, reachable contact.
+    if user.email and not user.email_verified:
+        raise HTTPException(
+            status_code=403,
+            detail="Please verify your email before booking. Check your inbox or resend the verification email from your profile.",
+        )
+
     # Sanitize all inputs
     name = _clean(name)
     email = _clean(email)

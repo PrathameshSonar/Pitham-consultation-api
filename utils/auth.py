@@ -15,7 +15,11 @@ import models
 logger = logging.getLogger("pitham.auth")
 
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_HOURS = 24 * 7  # 7 days
+# Reduced from 7 days. The previous lifetime gave any stolen token (cookie or
+# Bearer copy in localStorage) a week of validity — too long. With pwd_v
+# revocation in place (see get_current_user) the user can also kill all
+# sessions instantly by resetting their password.
+ACCESS_TOKEN_EXPIRE_HOURS = 8
 COOKIE_NAME = "pitham_session"
 IS_PROD = settings.core.is_production
 
@@ -45,10 +49,24 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 
 def create_token(data: dict) -> str:
+    """Mint a JWT. Callers must supply `pv` (password_version) so the token
+    can be revoked instantly by bumping the user's password_version. The
+    higher-level `mint_user_token` helper below pulls pv off the User row so
+    routers don't need to remember."""
     payload = data.copy()
     payload["exp"] = datetime.utcnow() + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
     payload["iat"] = datetime.utcnow()
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def mint_user_token(user: "models.User") -> str:
+    """Standard token shape for our auth flow — embeds the user's current
+    password_version so a future password reset invalidates it."""
+    return create_token({
+        "sub": str(user.id),
+        "role": user.role,
+        "pv": int(getattr(user, "password_version", 1) or 1),
+    })
 
 
 def decode_token(token: str) -> dict:
@@ -104,6 +122,14 @@ def get_current_user(
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
+    # Token-revocation gate: reject tokens minted before the user's current
+    # password_version. Tokens without `pv` are treated as v=1 so legacy
+    # tokens minted before this change still validate against fresh accounts
+    # (which also default to pv=1) but stop working as soon as pv is bumped.
+    token_pv = int(payload.get("pv", 1) or 1)
+    user_pv = int(getattr(user, "password_version", 1) or 1)
+    if token_pv != user_pv:
+        raise HTTPException(status_code=401, detail="Session has been revoked. Please sign in again.")
     return user
 
 

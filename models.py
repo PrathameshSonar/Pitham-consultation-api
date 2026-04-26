@@ -38,6 +38,11 @@ class User(Base):
     permissions = Column(Text, nullable=True, default="[]")
     is_active = Column(Boolean, default=True)
     email_verified = Column(Boolean, default=False)
+    # Bumped whenever the user's password is changed/reset. Embedded into every
+    # JWT as `pv` and re-checked in get_current_user — so a stolen long-lived
+    # token stops working the moment the user resets their password. Defaults
+    # to 1 (NOT NULL) so existing rows + future migrations stay simple.
+    password_version = Column(Integer, nullable=False, default=1)
     notify_email = Column(Boolean, default=True)
     notify_sms = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)

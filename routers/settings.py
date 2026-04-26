@@ -255,6 +255,16 @@ class PaymentGatewayUpdateRequest(BaseModel):
     # Pydantic v2: arbitrary key names are awkward to declare directly; use
     # a dict and validate keys server-side.
     values: dict
+    # Optional: explicit list of keys to wipe. Empty strings in `values` are
+    # ignored unless the caller also names them here. This stops a stale UI
+    # from silently clearing a secret just because the form re-rendered with
+    # an empty masked field.
+    clear: Optional[list[str]] = None
+
+
+# Some gateway secrets are well-formed (key_id is an alnum prefix etc.) — we
+# don't try to perfectly validate, but reject obviously bad input lengths.
+_MAX_SECRET_LENGTH = 2048
 
 
 @router.put("/admin/payment-gateways")
@@ -264,21 +274,42 @@ def update_payment_gateway_secrets(
     db: Session = Depends(get_db),
 ):
     """Bulk update of namespaced payment.* settings. Unknown keys are
-    silently dropped (defense-in-depth against a tampered frontend)."""
+    silently dropped (defense-in-depth against a tampered frontend).
+
+    Empty-string values are skipped unless the key is explicitly listed in
+    `clear` — protects against a stale form silently wiping a live secret
+    after a partial render or autofill."""
     if not isinstance(data.values, dict):
         raise HTTPException(status_code=400, detail="values must be an object")
+    clear_set = {k for k in (data.clear or []) if k in PAYMENT_GATEWAY_KEYS}
     written = []
+    skipped_empty = []
     for key, value in data.values.items():
         if key not in PAYMENT_GATEWAY_KEYS:
             continue
-        _set(db, key, str(value or ""))
+        text_value = str(value or "")
+        if len(text_value) > _MAX_SECRET_LENGTH:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Value for {key} exceeds {_MAX_SECRET_LENGTH} characters",
+            )
+        if not text_value and key not in clear_set:
+            # Empty without explicit clear → ignore. Caller wanted to leave
+            # the existing value untouched.
+            skipped_empty.append(key)
+            continue
+        _set(db, key, text_value)
         written.append(key)
     if written:
         log_action(
             db, admin.id, "update_payment_gateway_secrets", "settings", 0,
             f"Keys: {', '.join(sorted(written))}",
         )
-    return {"message": "Payment gateway secrets updated", "updated": written}
+    return {
+        "message": "Payment gateway secrets updated",
+        "updated": written,
+        "skipped_empty": skipped_empty,
+    }
 
 
 @router.post("/admin/settings/pending/{change_id}/reject")

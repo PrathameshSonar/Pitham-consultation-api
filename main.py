@@ -26,6 +26,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from starlette.middleware.base import BaseHTTPMiddleware
 
+import re
 from sqlalchemy import inspect, text
 
 from database import engine, Base
@@ -48,13 +49,34 @@ logger = logging.getLogger("pitham")
 Base.metadata.create_all(bind=engine)
 
 
+# Strict identifier shape — same as MySQL/Postgres unquoted-identifier rules.
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# DDL fragment must start with the column name and contain only the chars we
+# legitimately use in our migration calls (types, NOT NULL, DEFAULT literals,
+# parens for VARCHAR(N) etc.). Refuses semicolons, comments, anything spicy.
+_DDL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\s+[A-Za-z0-9_()'\s,.+\-]+$")
+
+
 def _ensure_column(table: str, column: str, ddl: str):
     """Add a column to an existing table if missing (idempotent micro-migration).
 
     create_all() only creates missing tables — it never adds columns to existing
     ones. Never raise from here — a failed migration should never block startup.
+
+    Inputs are regex-validated before being interpolated into the ALTER statement.
+    All callers in this file pass hard-coded literals today; the validation
+    guards against a future caller threading in user-controlled values and
+    silently introducing SQL injection.
     """
     try:
+        if not _IDENT_RE.match(table) or not _IDENT_RE.match(column):
+            logger.error(
+                "Migration refused: invalid identifier table=%r column=%r", table, column
+            )
+            return
+        if not _DDL_RE.match(ddl):
+            logger.error("Migration refused: invalid DDL fragment %r", ddl)
+            return
         insp = inspect(engine)
         if table not in insp.get_table_names():
             return  # create_all will handle it when the table is first created
@@ -76,6 +98,7 @@ _ensure_column("appointments", "reminder_1h_sent_at", "reminder_1h_sent_at TIMES
 # MySQL <8.0.13 rejects DEFAULT literals on TEXT/BLOB columns, so we add the
 # column NULLABLE and let the backfill below normalise existing rows to '[]'.
 _ensure_column("users", "permissions", "permissions TEXT NULL")
+_ensure_column("users", "password_version", "password_version INTEGER NOT NULL DEFAULT 1")
 _ensure_column("events", "registration_config", "registration_config TEXT NULL")
 _ensure_column("event_registrations", "tier_id",   "tier_id VARCHAR(64) NULL")
 _ensure_column("event_registrations", "tier_name", "tier_name VARCHAR(150) NULL")
