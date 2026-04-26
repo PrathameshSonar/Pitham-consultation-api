@@ -283,9 +283,95 @@ class EventOut(BaseModel):
     location_map_url: Optional[str] = None
     image_url: Optional[str] = None
     is_featured: bool = False
+    # Decoded `registration_config` JSON. Always present (never null) — the
+    # field validator hydrates the empty/disabled default for events that
+    # don't have registration set up. Public callers see this and decide
+    # whether to render the Register button.
+    registration_config: dict = {}
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @field_validator("registration_config", mode="before")
+    @classmethod
+    def _decode_registration_config(cls, v):
+        from utils.event_fields import parse_config  # local import — cycle-safe
+        if isinstance(v, dict):
+            return v
+        return parse_config(v if isinstance(v, str) else None)
+
+
+# ── Event registration ──────────────────────────────────────────────────────
+
+class EventRegistrationCreate(BaseModel):
+    """Payload sent by the public registration form. The server uses the
+    event's saved registration_config to decide which keys are valid and
+    which are required. Unknown keys in `field_values` are silently dropped.
+
+    `tier_id` is required when the event has tiers configured; ignored
+    otherwise (single-fee mode)."""
+    field_values: dict
+    tier_id: Optional[str] = None
+
+
+class EventRegistrationOut(BaseModel):
+    id: int
+    event_id: int
+    user_id: int
+    name: str
+    email: Optional[str] = None
+    mobile: Optional[str] = None
+    field_values: dict = {}
+    status: str
+    payment_status: str
+    payment_gateway: Optional[str] = None
+    payment_reference: Optional[str] = None
+    fee_amount: int = 0
+    tier_id: Optional[str] = None
+    tier_name: Optional[str] = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+    @field_validator("field_values", mode="before")
+    @classmethod
+    def _decode_field_values(cls, v):
+        if isinstance(v, dict):
+            return v
+        if isinstance(v, str) and v:
+            try:
+                parsed = json.loads(v)
+                return parsed if isinstance(parsed, dict) else {}
+            except (TypeError, ValueError):
+                return {}
+        return {}
+
+
+class EventRegistrationInitResult(BaseModel):
+    """Returned by POST /events/{id}/register. The shape varies by gateway:
+
+      * gateway="phonepe"  → redirect_url set; frontend window.location's away
+      * gateway="razorpay" → razorpay_order set; frontend opens checkout popup,
+                              then POSTs the verify endpoint with the signed result
+      * gateway="free"     → requires_payment_action=False; status already confirmed
+      * gateway="manual"   → requires_payment_action=True but neither redirect nor
+                              order; frontend just shows "we'll confirm offline"
+    """
+    registration_id: int
+    status: str
+    gateway: Optional[str] = None
+    requires_payment_action: bool = False
+    redirect_url: Optional[str] = None
+    razorpay_order: Optional[dict] = None
+
+
+class RazorpayVerifyRequest(BaseModel):
+    """The triple Razorpay's checkout JS hands the frontend after a successful
+    payment. The signature is HMAC-SHA256 over `order_id|payment_id` keyed
+    with our secret — only the real Razorpay servers can mint it."""
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
 
 
 # ── Testimonial ──────────────────────────────────────────────────────────────

@@ -207,6 +207,135 @@ def send_completion_notification(to: str, name: str, booking_id: int, analysis_p
 
 # ── OTP helper — send a password reset code over both channels ───────────────
 
+def send_event_registration_confirmation(
+    to: str,
+    name: str,
+    event_title: str,
+    event_date: str,
+    event_time: str = "",
+    location: str = "",
+    fee_amount: int = 0,
+    payment_status: str = "n/a",
+    custom_message: str = "",
+    mobile: str = "",
+):
+    """Sent after a successful event registration. Free events: confirmation
+    is immediate. Paid events: only sent once the gateway confirms payment.
+
+    `payment_status` is one of "paid" / "pending" / "n/a" — drives the
+    coloured pill at the top of the email."""
+    subject = f"Registered: {event_title} — {BRAND}"
+
+    if payment_status == "paid":
+        pay_pill = '<span style="color:#2E7D32">Paid ✓</span>'
+    elif payment_status == "pending":
+        pay_pill = '<span style="color:#E65100">Pending — admin will verify</span>'
+    else:
+        pay_pill = '<span style="color:#2E7D32">No payment required</span>'
+
+    when = event_date + (f" at {event_time}" if event_time else "")
+    location_row = (
+        f'<tr><td style="padding:4px 16px 4px 0"><strong>Location:</strong></td><td>{location}</td></tr>'
+        if location else ""
+    )
+    fee_row = (
+        f'<tr><td style="padding:4px 16px 4px 0"><strong>Fee:</strong></td><td>₹{fee_amount} — {pay_pill}</td></tr>'
+        if fee_amount > 0 else
+        f'<tr><td style="padding:4px 16px 4px 0"><strong>Fee:</strong></td><td>{pay_pill}</td></tr>'
+    )
+    custom_html = (
+        f'<div style="background:#F5E6C8;padding:12px 16px;border-radius:8px;margin:12px 0">{custom_message}</div>'
+        if custom_message else ""
+    )
+
+    body = _wrap_html(f"""
+    <h3>Namaste {name},</h3>
+    <p>Your registration for <strong>{event_title}</strong> is confirmed.</p>
+    <div style="background:#FFF4DE;padding:16px;border-radius:8px;margin:16px 0">
+      <table style="border-collapse:collapse">
+        <tr><td style="padding:4px 16px 4px 0"><strong>Event:</strong></td><td>{event_title}</td></tr>
+        <tr><td style="padding:4px 16px 4px 0"><strong>When:</strong></td><td>{when}</td></tr>
+        {location_row}
+        {fee_row}
+      </table>
+    </div>
+    {custom_html}
+    <p>You can view all your registrations under <strong>My Events</strong> in your dashboard.</p>
+    <p style="margin-top:24px">Regards,<br><strong>{BRAND}</strong></p>
+    """)
+    send_email(to, subject, body)
+    pay_line = f" Fee ₹{fee_amount} ({payment_status})." if fee_amount > 0 else ""
+    send_whatsapp(
+        mobile,
+        f"🙏 {name}, your registration for '{event_title}' on {when} is confirmed.{pay_line}\n— {BRAND_SHORT}",
+    )
+
+
+def send_event_waitlist_added(
+    to: str,
+    name: str,
+    event_title: str,
+    event_date: str,
+    mobile: str = "",
+):
+    """Sent when a user joins the waitlist (event was full at signup time)."""
+    subject = f"You're on the waitlist: {event_title} — {BRAND}"
+    body = _wrap_html(f"""
+    <h3>Namaste {name},</h3>
+    <p>The event <strong>{event_title}</strong> on {event_date} is currently full,
+       so we've added you to the <strong>waitlist</strong>.</p>
+    <p>If a spot opens up, we'll email you with instructions to confirm your registration
+       (and pay, if applicable).</p>
+    <p style="margin-top:24px">Regards,<br><strong>{BRAND}</strong></p>
+    """)
+    send_email(to, subject, body)
+    send_whatsapp(
+        mobile,
+        f"🙏 {name}, '{event_title}' on {event_date} is full. You're on the waitlist — "
+        f"we'll let you know if a spot opens. — {BRAND_SHORT}",
+    )
+
+
+def send_event_waitlist_promoted(
+    to: str,
+    name: str,
+    event_title: str,
+    event_date: str,
+    fee_amount: int,
+    needs_payment: bool,
+    event_url: str,
+    mobile: str = "",
+):
+    """Sent when admin/cancellation moves a waitlisted user up. For free
+    events, the registration flips straight to confirmed; for paid events
+    the user must come back and complete payment."""
+    subject = f"A spot opened — {event_title} — {BRAND}"
+    cta_html = (
+        f'<p style="text-align:center;margin:24px 0">'
+        f'<a href="{event_url}" style="background:#E65100;color:#fff;padding:12px 32px;'
+        f'border-radius:999px;text-decoration:none;font-weight:600">Complete payment</a></p>'
+        if needs_payment else ""
+    )
+    msg = (
+        f"You can now confirm your spot. Fee ₹{fee_amount} — please complete payment within 48 hours."
+        if needs_payment
+        else "Your spot is confirmed. See you at the event!"
+    )
+    body = _wrap_html(f"""
+    <h3>Good news, {name}!</h3>
+    <p>A spot has opened up for <strong>{event_title}</strong> on {event_date}.</p>
+    <p>{msg}</p>
+    {cta_html}
+    <p style="margin-top:24px">Regards,<br><strong>{BRAND}</strong></p>
+    """)
+    send_email(to, subject, body)
+    wa_msg = (
+        f"🎉 {name}, a spot opened for '{event_title}' on {event_date}. "
+        + (f"Complete payment of ₹{fee_amount}: {event_url}" if needs_payment else "Your spot is confirmed.")
+    )
+    send_whatsapp(mobile, wa_msg + f"\n— {BRAND_SHORT}")
+
+
 def send_password_reset_otp(to_email: str, to_mobile: str, name: str, otp: str):
     """Send the 6-digit reset OTP via email AND WhatsApp (whichever is configured).
     Callers can leave either recipient blank."""

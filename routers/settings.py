@@ -220,6 +220,67 @@ def approve_change(
     return {"message": f"Setting '{change.key}' approved and applied."}
 
 
+# ── Payment Gateway Secrets (super admin only) ─────────────────────────────
+# Stored as namespaced site_settings keys. The list of allowed keys is fixed
+# server-side so a stale frontend can't write arbitrary settings via this
+# endpoint. Resolution at runtime (DB → env fallback) lives in
+# utils/payment_secrets.py.
+
+PAYMENT_GATEWAY_KEYS = {
+    "payment.phonepe.client_id",
+    "payment.phonepe.client_secret",
+    "payment.phonepe.client_version",
+    "payment.phonepe.env",
+    "payment.phonepe.callback_username",
+    "payment.phonepe.callback_password",
+    "payment.razorpay.key_id",
+    "payment.razorpay.key_secret",
+    "payment.gpay.merchant_id",
+    "payment.gpay.api_key",
+}
+
+
+@router.get("/admin/payment-gateways")
+def get_payment_gateway_secrets(
+    admin: models.User = Depends(require_super_admin),
+    db: Session = Depends(get_db),
+):
+    """Return the currently-stored secret values. Super admin already has
+    full access so we don't bother masking — masking on the wire creates the
+    illusion of a fresh write when the admin saves a pre-filled form."""
+    return {k: _get(db, k) or "" for k in PAYMENT_GATEWAY_KEYS}
+
+
+class PaymentGatewayUpdateRequest(BaseModel):
+    # Pydantic v2: arbitrary key names are awkward to declare directly; use
+    # a dict and validate keys server-side.
+    values: dict
+
+
+@router.put("/admin/payment-gateways")
+def update_payment_gateway_secrets(
+    data: PaymentGatewayUpdateRequest,
+    admin: models.User = Depends(require_super_admin),
+    db: Session = Depends(get_db),
+):
+    """Bulk update of namespaced payment.* settings. Unknown keys are
+    silently dropped (defense-in-depth against a tampered frontend)."""
+    if not isinstance(data.values, dict):
+        raise HTTPException(status_code=400, detail="values must be an object")
+    written = []
+    for key, value in data.values.items():
+        if key not in PAYMENT_GATEWAY_KEYS:
+            continue
+        _set(db, key, str(value or ""))
+        written.append(key)
+    if written:
+        log_action(
+            db, admin.id, "update_payment_gateway_secrets", "settings", 0,
+            f"Keys: {', '.join(sorted(written))}",
+        )
+    return {"message": "Payment gateway secrets updated", "updated": written}
+
+
 @router.post("/admin/settings/pending/{change_id}/reject")
 def reject_change(
     change_id: int,

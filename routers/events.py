@@ -20,9 +20,27 @@ from utils.auth import require_super_admin
 from utils.permissions import require_section
 from utils.audit import log_action
 from utils.uploads import IMAGE_MIMES, validate_upload, check_size
+from utils.event_fields import normalize_config, serialize_config
+import json
 
 # Events are an admin facet of the Pitham CMS — share its section permission.
 _section_admin = require_section("pitham_cms")
+
+
+def _parse_registration_config_form(raw: str | None) -> str | None:
+    """Admin form ships registration_config as a JSON string in a multipart
+    field. Validate it through `normalize_config` (drops unknown keys,
+    enforces fee/gateway consistency) and re-serialise for storage. Returns
+    None when empty so we don't waste a row on the default-disabled config."""
+    if raw is None or raw == "":
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        # Soft-fail: keep whatever was there; admin can re-save.
+        return None
+    cleaned = normalize_config(parsed)
+    return serialize_config(cleaned)
 
 router = APIRouter(tags=["events"])
 
@@ -88,6 +106,80 @@ def get_event(event_id: int, db: Session = Depends(get_db)):
     return event
 
 
+@router.get("/events/{event_id}/availability")
+def event_availability(event_id: int, db: Session = Depends(get_db)):
+    """Lightweight public endpoint for the registration button to decide
+    whether to show 'Sold out' or 'N spots left'. Returns counts only —
+    no PII. Always 200; missing event returns null fields rather than 404
+    so the UI degrades gracefully.
+
+    With tiers, each tier reports its own count + remaining spots so the
+    public registration form can grey out / disable individual tier cards
+    that are individually sold out, even when the global event has room."""
+    event = db.query(models.Event).filter(models.Event.id == event_id).first()
+    if not event:
+        return {
+            "max_attendees": None, "registered": 0, "spots_remaining": None,
+            "is_full": False, "tiers": [],
+        }
+    from utils.event_fields import parse_config
+    config = parse_config(event.registration_config)
+
+    # Global capacity
+    cap = config.get("max_attendees")
+    SEAT_HOLDING = ("pending_payment", "confirmed", "attended")
+    if cap:
+        registered = (
+            db.query(models.EventRegistration)
+            .filter(
+                models.EventRegistration.event_id == event_id,
+                models.EventRegistration.status.in_(SEAT_HOLDING),
+            )
+            .count()
+        )
+        global_block = {
+            "max_attendees": int(cap),
+            "registered": registered,
+            "spots_remaining": max(int(cap) - registered, 0),
+            "is_full": registered >= int(cap),
+        }
+    else:
+        global_block = {"max_attendees": None, "registered": 0, "spots_remaining": None, "is_full": False}
+
+    # Per-tier capacity. Even tiers without their own cap report their
+    # current registered count so the UI can show "12 registered" if helpful.
+    tier_blocks = []
+    for tier in config.get("tiers") or []:
+        t_cap = tier.get("max_attendees")
+        t_count = (
+            db.query(models.EventRegistration)
+            .filter(
+                models.EventRegistration.event_id == event_id,
+                models.EventRegistration.tier_id == tier["id"],
+                models.EventRegistration.status.in_(SEAT_HOLDING),
+            )
+            .count()
+        )
+        if t_cap:
+            tier_blocks.append({
+                "id": tier["id"],
+                "max_attendees": int(t_cap),
+                "registered": t_count,
+                "spots_remaining": max(int(t_cap) - t_count, 0),
+                "is_full": t_count >= int(t_cap),
+            })
+        else:
+            tier_blocks.append({
+                "id": tier["id"],
+                "max_attendees": None,
+                "registered": t_count,
+                "spots_remaining": None,
+                "is_full": False,
+            })
+
+    return {**global_block, "tiers": tier_blocks}
+
+
 # ── Admin: create (multipart so image can be uploaded) ───────────────────────
 
 @router.post("/admin/events", response_model=schemas.EventOut)
@@ -100,6 +192,7 @@ async def admin_create_event(
     location_map_url: str = Form(""),
     image_url: str = Form(""),
     is_featured: bool = Form(False),
+    registration_config: str = Form(""),
     image: Optional[UploadFile] = File(None),
     admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
@@ -125,6 +218,7 @@ async def admin_create_event(
         location_map_url=location_map_url.strip() or None,
         image_url=final_image,
         is_featured=is_featured,
+        registration_config=_parse_registration_config_form(registration_config),
         created_by=admin.id,
     )
     db.add(event)
@@ -161,6 +255,7 @@ async def admin_update_event(
     location_map_url: Optional[str] = Form(None),
     image_url: Optional[str] = Form(None),
     is_featured: Optional[bool] = Form(None),
+    registration_config: Optional[str] = Form(None),
     image: Optional[UploadFile] = File(None),
     admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
@@ -183,6 +278,9 @@ async def admin_update_event(
         event.location_map_url = location_map_url.strip() or None
     if is_featured is not None:
         event.is_featured = is_featured
+    if registration_config is not None:
+        # Empty string → wipe config; non-empty → validate + persist
+        event.registration_config = _parse_registration_config_form(registration_config)
 
     # Image: file upload wins; otherwise plain url field replaces if non-empty
     if image and image.filename:

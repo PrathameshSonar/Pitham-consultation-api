@@ -33,7 +33,7 @@ import models  # noqa: F401 — registers all models with Base
 from routers import (
     auth, appointments, users, documents, queries,
     recordings, user_lists, payments, analytics, admin_tools,
-    events, pitham, broadcasts, feedback, files,
+    events, event_registrations, pitham, broadcasts, feedback, files,
 )
 from routers import settings as settings_router  # renamed to avoid collision with config.settings
 
@@ -76,6 +76,9 @@ _ensure_column("appointments", "reminder_1h_sent_at", "reminder_1h_sent_at TIMES
 # MySQL <8.0.13 rejects DEFAULT literals on TEXT/BLOB columns, so we add the
 # column NULLABLE and let the backfill below normalise existing rows to '[]'.
 _ensure_column("users", "permissions", "permissions TEXT NULL")
+_ensure_column("events", "registration_config", "registration_config TEXT NULL")
+_ensure_column("event_registrations", "tier_id",   "tier_id VARCHAR(64) NULL")
+_ensure_column("event_registrations", "tier_name", "tier_name VARCHAR(150) NULL")
 
 
 def _backfill_user_permissions():
@@ -326,6 +329,7 @@ app.include_router(settings_router.router)
 app.include_router(analytics.router)
 app.include_router(admin_tools.router)
 app.include_router(events.router)
+app.include_router(event_registrations.router)
 app.include_router(pitham.router)
 app.include_router(broadcasts.router)
 app.include_router(feedback.router)

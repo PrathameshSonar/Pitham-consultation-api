@@ -45,6 +45,20 @@ DEFAULTS: dict[str, str] = {
     "contact_phone": "",
     "contact_address": "",
     "contact_map_url": "",
+
+    # Payment gateway secrets — managed via /admin/payment-gateways. Empty
+    # default means "fall back to the env var read by config.py at startup".
+    # See utils/payment_secrets.get_phonepe_credentials for the resolution.
+    "payment.phonepe.client_id":         "",
+    "payment.phonepe.client_secret":     "",
+    "payment.phonepe.client_version":    "",
+    "payment.phonepe.env":                "",   # "production" | "sandbox"
+    "payment.phonepe.callback_username": "",
+    "payment.phonepe.callback_password": "",
+    "payment.razorpay.key_id":           "",
+    "payment.razorpay.key_secret":       "",
+    "payment.gpay.merchant_id":          "",
+    "payment.gpay.api_key":              "",
 }
 
 

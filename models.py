@@ -197,7 +197,58 @@ class Event(Base):
     location_map_url = Column(String(500), nullable=True)         # Google Maps link for "navigate" button
     image_url = Column(String(500), nullable=True)                # external URL OR uploaded file path
     is_featured = Column(Boolean, default=False, nullable=False)  # admin-marked highlight
+    # JSON-encoded registration form config — see utils/event_fields.py for the
+    # canonical shape. Null/empty means registration is not offered.
+    registration_config = Column(Text, nullable=True)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class EventRegistration(Base):
+    """One row per (event, user) signup. The configurable per-event form
+    fields land in `field_values` as a JSON blob — the catalog (utils/event_fields)
+    defines which keys can appear there.
+
+    `status` is the lifecycle:
+      pending_payment → user submitted, paid gateway not yet confirmed
+      confirmed       → free event, OR paid gateway returned success
+      cancelled       → user or admin cancelled
+      attended        → admin marks after the event
+    """
+    __tablename__ = "event_registrations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_id = Column(Integer, ForeignKey("events.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+
+    # Snapshot the canonical contact fields at registration time so admin views
+    # don't need a join to display "who registered" — and so renaming a user
+    # later doesn't rewrite history.
+    name = Column(String(150), nullable=False)
+    email = Column(String(150), nullable=True)
+    mobile = Column(String(20), nullable=True)
+
+    # All other configurable fields (dob, tob, problem_statement, etc.) land
+    # here as a small JSON object keyed by catalog field key.
+    field_values = Column(Text, nullable=True)
+
+    status = Column(String(30), default="pending_payment", nullable=False, index=True)
+    payment_status = Column(String(20), default="pending", nullable=False)  # pending | paid | refunded | n/a
+    payment_gateway = Column(String(30), nullable=True)        # gateway used at the time of registration
+    payment_reference = Column(String(150), nullable=True)     # gateway txn id
+    fee_amount = Column(Integer, default=0, nullable=False)    # snapshot of fee at registration time
+
+    # Tier (registration option) snapshot. NULL when the event has no tiers
+    # configured — the simple single-fee mode. tier_name is denormalised so
+    # admin views render fast and renaming a tier later doesn't rewrite history.
+    tier_id = Column(String(64), nullable=True, index=True)
+    tier_name = Column(String(150), nullable=True)
+
+    confirmation_sent_at = Column(DateTime, nullable=True)
+    cancelled_at = Column(DateTime, nullable=True)
+    attended_at = Column(DateTime, nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
