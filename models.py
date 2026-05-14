@@ -67,6 +67,11 @@ class Appointment(Base):
     problem = Column(Text, nullable=False)
     selfie_path = Column(String(500), nullable=True)
     payment_status = Column(String(20), default="pending")   # pending | paid
+    # See EventRegistration above for the rationale behind the two-column
+    # split. payment_order_id = init-time anchor, payment_id = post-success
+    # reference, payment_reference kept for legacy reads.
+    payment_order_id = Column(String(255), nullable=True, index=True)
+    payment_id = Column(String(255), nullable=True, index=True)
     payment_reference = Column(String(150), nullable=True)
     status = Column(String(30), default=AppointmentStatus.pending)
     scheduled_date = Column(String(20), nullable=True)
@@ -241,7 +246,16 @@ class EventRegistration(Base):
     status = Column(String(30), default="pending_payment", nullable=False, index=True)
     payment_status = Column(String(20), default="pending", nullable=False)  # pending | paid | refunded | n/a
     payment_gateway = Column(String(30), nullable=True)        # gateway used at the time of registration
-    payment_reference = Column(String(150), nullable=True)     # gateway txn id
+    # Two-column payment-id split (replaces the older payment_reference single
+    # column that did double duty). payment_order_id is the gateway-issued ID
+    # at init time (Razorpay order_id, PhonePe merchant_order_id) and is the
+    # anchor that verify endpoints + webhooks bind against. payment_id is the
+    # post-success ID (Razorpay payment_id, manual admin-supplied reference).
+    # payment_reference is kept for backward compatibility with admin lists /
+    # CSV exports — populated as `payment_id || payment_order_id` on every write.
+    payment_order_id = Column(String(255), nullable=True, index=True)
+    payment_id = Column(String(255), nullable=True, index=True)
+    payment_reference = Column(String(150), nullable=True)     # legacy: mirrors payment_id || payment_order_id
     fee_amount = Column(Integer, default=0, nullable=False)    # snapshot of fee at registration time
 
     # Tier (registration option) snapshot. NULL when the event has no tiers
@@ -250,9 +264,23 @@ class EventRegistration(Base):
     tier_id = Column(String(64), nullable=True, index=True)
     tier_name = Column(String(150), nullable=True)
 
+    # "self" → the booker is registering themselves. snapshot fields equal
+    #          the booker's profile.
+    # "other" → the booker is registering someone else (spouse, child, parent).
+    #           user_id still points to the booker (so they can manage the row);
+    #           snapshot fields hold whatever the booker typed in the form.
+    # Default "self" so existing rows make sense post-migration.
+    attendee_role = Column(String(20), default="self", nullable=False)
+
     confirmation_sent_at = Column(DateTime, nullable=True)
     cancelled_at = Column(DateTime, nullable=True)
     attended_at = Column(DateTime, nullable=True)
+
+    # Path to the auto-generated payment receipt PDF. Populated the moment
+    # the row flips to paid (any of: razorpay verify, razorpay webhook,
+    # phonepe status poll, phonepe webhook, manual confirm). The booker
+    # downloads it from My Events; mirrors the consultation receipt flow.
+    receipt_path = Column(String(500), nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

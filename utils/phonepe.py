@@ -71,18 +71,25 @@ def initiate_payment(
 def check_payment_status(merchant_order_id: str) -> dict:
     """
     Check status of a PhonePe order.
-    Returns { "success": bool, "state": "COMPLETED"|"PENDING"|"FAILED" }
+    Returns { "success": bool, "state": "COMPLETED"|"PENDING"|"FAILED",
+              "merchant_order_id": str, "amount_paise": int }
+
+    `amount_paise` is what PhonePe says was actually paid. Callers should
+    cross-check it against the expected fee before flipping a row to paid —
+    otherwise a tampered redirect URL could confirm an under-paid order.
     """
     client = _get_client()
 
     try:
         response = client.get_order_status(merchant_order_id)
         state = response.state  # "COMPLETED", "PENDING", "FAILED"
+        amount_paise = int(getattr(response, "amount", 0) or 0)
 
         return {
             "success": state == "COMPLETED",
             "state": state,
             "merchant_order_id": merchant_order_id,
+            "amount_paise": amount_paise,
         }
     except PhonePeException as e:
         raise PhonePeError(f"PhonePe status check failed: {e.message}")
@@ -91,7 +98,17 @@ def check_payment_status(merchant_order_id: str) -> dict:
 def validate_callback(authorization_header: str, callback_body: str) -> dict:
     """
     Validate and parse a PhonePe webhook callback.
-    Returns { "event": "...", "state": "...", "merchant_order_id": "..." }
+    Returns:
+        {
+            "event": "...",
+            "state": "COMPLETED" | "PENDING" | "FAILED",
+            "merchant_order_id": "...",
+            "amount_paise": int,   # 0 when payload doesn't surface it
+        }
+
+    Raises PhonePeError on Basic-auth mismatch — caller MUST surface this as
+    a 401 so PhonePe retries (and so misconfigurations don't masquerade as
+    silent successes).
     """
     client = _get_client()
     cfg = settings.phonepe
@@ -110,10 +127,16 @@ def validate_callback(authorization_header: str, callback_body: str) -> dict:
         event = callback_response.event
         payload = callback_response.payload
 
+        # PhonePe's SDK exposes amount on the payload as paise. Defaulting to
+        # 0 keeps the caller's amount-comparison defensive when the field
+        # isn't present (e.g. on FAILED callbacks).
+        amount_paise = int(getattr(payload, "amount", 0) or 0)
+
         return {
             "event": event,
             "state": getattr(payload, "state", "UNKNOWN"),
             "merchant_order_id": getattr(payload, "original_merchant_order_id", ""),
+            "amount_paise": amount_paise,
         }
     except PhonePeException as e:
         raise PhonePeError(f"Callback validation failed: {e.message}")

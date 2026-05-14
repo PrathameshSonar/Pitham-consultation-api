@@ -45,8 +45,16 @@ router = APIRouter(tags=["settings"])
 
 @router.get("/settings/public")
 def get_public_settings(db: Session = Depends(get_db)):
+    # Validate the gateway selection on read so a typo / stale value never
+    # reaches the booking page. Anything other than the supported set falls
+    # back to phonepe (the legacy default).
+    gateway = (_get(db, "consultation_payment_gateway") or "phonepe").strip().lower()
+    if gateway not in ("phonepe", "razorpay"):
+        gateway = "phonepe"
+
     return {
         "consultation_fee": int(_get(db, "consultation_fee") or DEFAULTS["consultation_fee"]),
+        "consultation_payment_gateway": gateway,
         "booking_enabled": _get(db, "booking_enabled") == "true",
         "booking_resume_date": _get(db, "booking_resume_date"),
         "booking_hold_message": _get(db, "booking_hold_message"),
@@ -69,6 +77,7 @@ def get_public_settings(db: Session = Depends(get_db)):
 
 class UpdateSettingsRequest(BaseModel):
     consultation_fee: Optional[int] = None
+    consultation_payment_gateway: Optional[str] = None
     booking_enabled: Optional[bool] = None
     booking_resume_date: Optional[str] = None
     booking_hold_message: Optional[str] = None
@@ -147,6 +156,14 @@ def admin_update_settings(
     # Super admin — apply directly
     if data.consultation_fee is not None:
         _set(db, "consultation_fee", str(data.consultation_fee))
+    if data.consultation_payment_gateway is not None:
+        gw = (data.consultation_payment_gateway or "").strip().lower()
+        if gw not in ("phonepe", "razorpay"):
+            raise HTTPException(
+                status_code=400,
+                detail="Gateway must be 'phonepe' or 'razorpay'.",
+            )
+        _set(db, "consultation_payment_gateway", gw)
     if data.booking_enabled is not None:
         _set(db, "booking_enabled", "true" if data.booking_enabled else "false")
     if data.booking_resume_date is not None:
@@ -235,6 +252,7 @@ PAYMENT_GATEWAY_KEYS = {
     "payment.phonepe.callback_password",
     "payment.razorpay.key_id",
     "payment.razorpay.key_secret",
+    "payment.razorpay.webhook_secret",
     "payment.gpay.merchant_id",
     "payment.gpay.api_key",
 }

@@ -181,6 +181,12 @@ def bulk_assign_from_gallery(
     skipped: list[str] = []
     batch_id    = str(uuid.uuid4())
     batch_label = data.batch_label or f"Bulk: {len(data.user_ids)} users"
+    # Per-batch description overrides the gallery template's description
+    # when the admin provides one — lets them tag this batch with context
+    # ("Mantra for Maha Yajna 2026", "Post-consultation guidance — March").
+    # Stripped of whitespace so a stray space doesn't blank the description.
+    custom_desc = (data.description or "").strip()
+    effective_description = custom_desc if custom_desc else template.description
 
     for uid in set(data.user_ids):
         user = db.query(models.User).filter(models.User.id == uid).first()
@@ -196,7 +202,7 @@ def bulk_assign_from_gallery(
             doc = models.Document(
                 user_id=uid,
                 title=template.title,
-                description=template.description,
+                description=effective_description,
                 file_path=new_path,
                 uploaded_by=admin.id,
                 source_template_id=template.id,

@@ -102,6 +102,18 @@ _ensure_column("users", "password_version", "password_version INTEGER NOT NULL D
 _ensure_column("events", "registration_config", "registration_config TEXT NULL")
 _ensure_column("event_registrations", "tier_id",   "tier_id VARCHAR(64) NULL")
 _ensure_column("event_registrations", "tier_name", "tier_name VARCHAR(150) NULL")
+_ensure_column(
+    "event_registrations",
+    "attendee_role",
+    "attendee_role VARCHAR(20) NOT NULL DEFAULT 'self'",
+)
+_ensure_column("event_registrations", "receipt_path", "receipt_path VARCHAR(500) NULL")
+# Two-column payment-id split — see models.py for the rationale. Both nullable
+# so existing rows keep working until the backfill below populates them.
+_ensure_column("event_registrations", "payment_order_id", "payment_order_id VARCHAR(255) NULL")
+_ensure_column("event_registrations", "payment_id",       "payment_id VARCHAR(255) NULL")
+_ensure_column("appointments",        "payment_order_id", "payment_order_id VARCHAR(255) NULL")
+_ensure_column("appointments",        "payment_id",       "payment_id VARCHAR(255) NULL")
 
 
 def _backfill_user_permissions():
@@ -150,6 +162,73 @@ def _backfill_user_permissions():
 
 
 _backfill_user_permissions()
+
+
+def _backfill_payment_ids():
+    """Populate the new payment_order_id / payment_id columns from the legacy
+    payment_reference column on existing rows.
+
+    Mapping (best-effort; safe to re-run):
+        - status pending_payment → payment_reference is the order/transaction
+          id created at init time → copy to payment_order_id.
+        - payment_status paid    → payment_reference is the success ID
+          (Razorpay payment_id, PhonePe merchant_order_id which we treat as
+          both, or admin-supplied manual reference) → copy to payment_id.
+        - For paid Razorpay rows the order_id is no longer recoverable from
+          the row alone (we used to overwrite it on verify). That's
+          acceptable — the new code path stores both, and replay defence for
+          those rows still works because payment_id is set.
+
+    Idempotent: only writes when the target column is null.
+    """
+    try:
+        from sqlalchemy.orm import Session
+        from database import SessionLocal
+
+        db: Session = SessionLocal()
+        try:
+            er_paid = db.execute(
+                models.EventRegistration.__table__.update()
+                .where(models.EventRegistration.payment_status == "paid")
+                .where(models.EventRegistration.payment_id.is_(None))
+                .where(models.EventRegistration.payment_reference.isnot(None))
+                .values(payment_id=models.EventRegistration.payment_reference)
+            ).rowcount or 0
+            er_pending = db.execute(
+                models.EventRegistration.__table__.update()
+                .where(models.EventRegistration.status == "pending_payment")
+                .where(models.EventRegistration.payment_order_id.is_(None))
+                .where(models.EventRegistration.payment_reference.isnot(None))
+                .values(payment_order_id=models.EventRegistration.payment_reference)
+            ).rowcount or 0
+            ap_paid = db.execute(
+                models.Appointment.__table__.update()
+                .where(models.Appointment.payment_status == "paid")
+                .where(models.Appointment.payment_id.is_(None))
+                .where(models.Appointment.payment_reference.isnot(None))
+                .values(payment_id=models.Appointment.payment_reference)
+            ).rowcount or 0
+            ap_pending = db.execute(
+                models.Appointment.__table__.update()
+                .where(models.Appointment.status == "payment_pending")
+                .where(models.Appointment.payment_order_id.is_(None))
+                .where(models.Appointment.payment_reference.isnot(None))
+                .values(payment_order_id=models.Appointment.payment_reference)
+            ).rowcount or 0
+            total = er_paid + er_pending + ap_paid + ap_pending
+            if total:
+                db.commit()
+                logger.info(
+                    "Payment-id backfill: er_paid=%d er_pending=%d ap_paid=%d ap_pending=%d",
+                    er_paid, er_pending, ap_paid, ap_pending,
+                )
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error("Payment-id backfill failed: %s", e)
+
+
+_backfill_payment_ids()
 
 
 def _purge_expired_one_time_tokens():

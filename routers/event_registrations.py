@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
@@ -205,6 +206,83 @@ def _promote_oldest_waitlist(db: Session, event_id: int) -> Optional[models.Even
     return waitlist_row
 
 
+def _set_order_id(reg: models.EventRegistration, order_id: str) -> None:
+    """Stamp the gateway order_id on a registration at init time. Also
+    mirrors to payment_reference so legacy admin code keeps working until
+    the frontend is migrated to read payment_order_id directly."""
+    reg.payment_order_id = order_id
+    reg.payment_reference = order_id
+
+
+def _set_payment_id(reg: models.EventRegistration, payment_id: str) -> None:
+    """Stamp the gateway payment_id on a registration after success. Mirrors
+    to payment_reference (post-success it always wins over order_id) for
+    legacy reads. Does NOT clear payment_order_id — both are kept so the
+    audit trail shows what we initiated AND what was paid."""
+    reg.payment_id = payment_id
+    reg.payment_reference = payment_id
+
+
+def _generate_event_receipt(
+    event: models.Event,
+    reg: models.EventRegistration,
+    db: Session,
+) -> Optional[str]:
+    """Render the registration receipt PDF and persist its path on the row.
+    Best-effort: any failure is logged but never raised — receipt generation
+    must never roll back a successful payment confirmation. Returns the
+    persisted path on success.
+
+    Caller MUST only invoke this after the row has been verified paid.
+    """
+    if reg.payment_status != "paid":
+        return None
+    try:
+        from utils.pdf_event_receipt import generate_event_receipt
+        # Decode field_values JSON (the column stores raw JSON text).
+        try:
+            fields = json.loads(reg.field_values) if reg.field_values else {}
+        except (TypeError, ValueError):
+            fields = {}
+        # Booker name surfaces only on "other" rows; cheap lookup, can be
+        # null if the user record was deleted (DPDP delete) — receipt still
+        # renders with attendee details only.
+        booker_name = None
+        if reg.attendee_role == "other":
+            booker = db.query(models.User).filter(models.User.id == reg.user_id).first()
+            booker_name = booker.name if booker else None
+
+        booked_on = (
+            reg.created_at.strftime("%d %B %Y")
+            if reg.created_at
+            else datetime.utcnow().strftime("%d %B %Y")
+        )
+        path = generate_event_receipt(
+            registration_id=reg.id,
+            event_title=event.title,
+            event_date=event.event_date,
+            event_time=event.event_time,
+            event_location=event.location,
+            tier_name=reg.tier_name,
+            attendee_name=reg.name or "",
+            attendee_email=reg.email,
+            attendee_mobile=reg.mobile,
+            field_values=fields,
+            fee_amount=int(reg.fee_amount or 0),
+            payment_gateway=reg.payment_gateway,
+            payment_id=reg.payment_id,
+            payment_order_id=reg.payment_order_id,
+            attendee_role=reg.attendee_role or "self",
+            booker_name=booker_name,
+            booked_on=booked_on,
+        )
+        reg.receipt_path = path
+        return path
+    except Exception as e:
+        logger.warning("event receipt generation failed reg=%s: %s", reg.id, e)
+        return None
+
+
 def _send_confirmation_email(event: models.Event, reg: models.EventRegistration, config: dict) -> None:
     """Best-effort send. Never raises — confirmation failure shouldn't roll
     back a successful registration."""
@@ -240,52 +318,133 @@ def register_for_event(
     user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    event = _get_event_or_404(db, event_id)
+    # Serialise concurrent /register calls for the same event by taking a
+    # row-level lock on the Event row before counting seats. Two users
+    # racing for the last seat used to both pass `.count() < cap` and both
+    # insert; with `with_for_update()` the second one blocks until the
+    # first commits, sees the updated count, and lands on the waitlist (or
+    # gets a "fully booked" 400 if waitlist is off). The lock releases on
+    # commit / rollback at the end of this request.
+    event = (
+        db.query(models.Event)
+        .filter(models.Event.id == event_id)
+        .with_for_update()
+        .first()
+    )
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
     config = parse_config(event.registration_config)
 
     _ensure_registration_open(event, config)
 
-    # One registration per user per event — flipping the registration to
-    # "cancelled" then re-registering creates a fresh row, but an already-
-    # active row blocks duplicates.
-    existing = (
-        db.query(models.EventRegistration)
-        .filter(
-            models.EventRegistration.event_id == event_id,
-            models.EventRegistration.user_id == user.id,
-            models.EventRegistration.status.in_(("pending_payment", "confirmed", "attended")),
+    # ── Retry path — re-fire payment for a specific pending row ───────────
+    #
+    # When the user clicks "Complete payment" on My Events, the frontend
+    # passes ?reg_id=N → reaches us as data.reg_id. We look up THAT exact
+    # row, refuse if it's already paid (defends against a stale UI clicking
+    # the button after a webhook quietly confirmed the row), and re-issue
+    # the gateway with the live fee/gateway from the current event config.
+    #
+    # We deliberately do NOT auto-detect "user has a pending row, retry it
+    # instead of creating a fresh one" — that broke the multi-attendee use
+    # case where the same booker registers self in tier A then submits the
+    # form again to register their wife in tier B. Retry has to be explicit.
+    if data.reg_id is not None:
+        existing = (
+            db.query(models.EventRegistration)
+            .filter(
+                models.EventRegistration.id == data.reg_id,
+                models.EventRegistration.event_id == event_id,
+                models.EventRegistration.user_id == user.id,
+            )
+            .first()
         )
-        .first()
-    )
-    if existing:
-        # If they're stuck in pending_payment for a hosted/popup gateway, kick
-        # the gateway again so the user can complete payment without creating
-        # a duplicate row. The reference column gets the fresh txn id.
-        if existing.status == "pending_payment" and existing.payment_gateway in ("phonepe", "razorpay"):
-            try:
-                result = initiate_event_payment(
-                    db,
-                    gateway=existing.payment_gateway,
-                    registration_id=existing.id,
-                    amount_rupees=existing.fee_amount,
-                    user_mobile=user.mobile or "",
-                )
-                existing.payment_reference = result.reference
-                db.commit()
-                return schemas.EventRegistrationInitResult(
-                    registration_id=existing.id,
-                    status=existing.status,
-                    gateway=existing.payment_gateway,
-                    requires_payment_action=result.requires_payment_action,
-                    redirect_url=result.redirect_url,
-                    razorpay_order=result.razorpay_order,
-                )
-            except GatewayError as e:
-                raise HTTPException(status_code=400, detail=str(e))
-        raise HTTPException(
-            status_code=400,
-            detail="You're already registered for this event. See My Events in your dashboard.",
-        )
+        if not existing:
+            raise HTTPException(status_code=404, detail="Registration not found")
+        # Ground-truth the status BEFORE doing anything irreversible. If a
+        # webhook landed in the background and confirmed the row, return
+        # success with the existing IDs instead of opening another payment.
+        # This is the "people are trusting us with money" path — never
+        # double-charge a user who already paid.
+        if existing.payment_status == "paid" or existing.status == "confirmed":
+            return schemas.EventRegistrationInitResult(
+                registration_id=existing.id,
+                status=existing.status,
+                gateway=existing.payment_gateway,
+                requires_payment_action=False,
+            )
+        if existing.status not in ("pending_payment",):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot complete payment for a registration in status '{existing.status}'.",
+            )
+        if existing.payment_gateway not in ("phonepe", "razorpay"):
+            raise HTTPException(
+                status_code=400,
+                detail="This registration does not use an online gateway.",
+            )
+
+        # Re-resolve fee + gateway from the live event/tier config. The
+        # snapshot on the row stays for receipt/audit purposes, but a fresh
+        # payment attempt always uses the live values — otherwise an admin
+        # who corrected the price after the row was created would charge
+        # the stale amount.
+        current_fee = int(existing.fee_amount or 0)
+        current_gateway = existing.payment_gateway
+        if existing.tier_id:
+            tier = find_tier(config, existing.tier_id)
+            if tier:
+                current_fee = int(tier.get("fee", 0) or 0)
+        else:
+            current_fee = int(config.get("fee", 0) or 0)
+        current_gateway = config.get("gateway") or current_gateway
+        if current_fee == 0:
+            # Event went free between init and retry — confirm and skip gateway.
+            existing.fee_amount = 0
+            existing.payment_status = "n/a"
+            existing.payment_gateway = "free"
+            existing.status = "confirmed"
+            db.commit()
+            db.refresh(existing)
+            _send_confirmation_email(event, existing, config)
+            db.commit()
+            return schemas.EventRegistrationInitResult(
+                registration_id=existing.id,
+                status=existing.status,
+                gateway="free",
+                requires_payment_action=False,
+            )
+        try:
+            result = initiate_event_payment(
+                db,
+                gateway=current_gateway,
+                registration_id=existing.id,
+                amount_rupees=current_fee,
+                user_mobile=user.mobile or "",
+            )
+            existing.fee_amount = current_fee
+            existing.payment_gateway = current_gateway
+            if result.reference:
+                _set_order_id(existing, result.reference)
+            # Fresh init = brand-new order. Clear any stale payment_id from
+            # an earlier abandoned attempt so the replay-defence lookup on
+            # verify never mismatches against a leftover ID.
+            existing.payment_id = None
+            db.commit()
+            log_action(
+                db, user.id, "event_registration_payment_retry", "event_registration", existing.id,
+                f"gateway={current_gateway} fee={current_fee}",
+            )
+            return schemas.EventRegistrationInitResult(
+                registration_id=existing.id,
+                status=existing.status,
+                gateway=existing.payment_gateway,
+                requires_payment_action=result.requires_payment_action,
+                redirect_url=result.redirect_url,
+                razorpay_order=result.razorpay_order,
+            )
+        except GatewayError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
     # ── Tier resolution (registration options) ─────────────────────────────
     # Events can be configured with multiple "options" — Mukhya Yajmaan ₹11000,
@@ -329,12 +488,23 @@ def register_for_event(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Pull canonical contact fields out of the cleaned values so admin lists
-    # don't have to dig into JSON. Fall back to the user profile when the
-    # form didn't ask for that field.
-    name   = (cleaned.pop("name", None)   or user.name   or "").strip()
-    email  = (cleaned.pop("email", None)  or user.email  or "").strip() or None
-    mobile = (cleaned.pop("mobile", None) or user.mobile or "").strip() or None
+    # Validate the attendee role, defaulting to "self" on anything unexpected.
+    # "self" → prefill from booker's profile when the form omits a field.
+    # "other" → no profile fallback; the booker is registering someone else,
+    #           we must not leak the booker's name/email/mobile onto a row
+    #           that's actually about a different person.
+    attendee_role = (data.attendee_role or "self").strip().lower()
+    if attendee_role not in ("self", "other"):
+        attendee_role = "self"
+
+    if attendee_role == "self":
+        name   = (cleaned.pop("name", None)   or user.name   or "").strip()
+        email  = (cleaned.pop("email", None)  or user.email  or "").strip() or None
+        mobile = (cleaned.pop("mobile", None) or user.mobile or "").strip() or None
+    else:
+        name   = (cleaned.pop("name", None)   or "").strip()
+        email  = (cleaned.pop("email", None)  or "").strip() or None
+        mobile = (cleaned.pop("mobile", None) or "").strip() or None
 
     if not name:
         raise HTTPException(status_code=400, detail="Name is required")
@@ -372,6 +542,7 @@ def register_for_event(
             fee_amount=0,                    # snapshot zero — real fee captured on promotion
             tier_id=tier_id_snap,
             tier_name=tier_name_snap,
+            attendee_role=attendee_role,
         )
         db.add(reg)
         db.commit()
@@ -410,6 +581,7 @@ def register_for_event(
         fee_amount=fee,
         tier_id=tier_id_snap,
         tier_name=tier_name_snap,
+        attendee_role=attendee_role,
     )
     db.add(reg)
     db.commit()
@@ -431,7 +603,7 @@ def register_for_event(
         raise HTTPException(status_code=400, detail=str(e))
 
     if result.reference:
-        reg.payment_reference = result.reference
+        _set_order_id(reg, result.reference)
     if not result.requires_payment_action:
         # Free event — settled at creation time.
         reg.status = "confirmed"
@@ -480,6 +652,39 @@ def razorpay_verify(
     if reg.status == "confirmed":
         return {"success": True, "registration_id": reg.id}
 
+    # Bind the verify request to THIS registration's order. Without this, an
+    # attacker who legitimately paid for a cheap registration could replay
+    # their own (order_id, payment_id, signature) triple against an expensive
+    # one — the HMAC verifies fine because it's signed over what the client
+    # sent, not what we minted at init time.
+    if not reg.payment_order_id or data.razorpay_order_id != reg.payment_order_id:
+        logger.warning(
+            "razorpay order_id mismatch reg=%s expected=%s got=%s",
+            reg.id, reg.payment_order_id, data.razorpay_order_id,
+        )
+        raise HTTPException(status_code=400, detail="Order ID does not match this registration.")
+
+    # Replay defence — same payment_id can't confirm two registrations. The
+    # lookup is on payment_id specifically (not the legacy payment_reference
+    # column) so it's robust against the two values diverging during
+    # migration of older rows.
+    duplicate = (
+        db.query(models.EventRegistration)
+        .filter(
+            models.EventRegistration.id != reg.id,
+            models.EventRegistration.payment_gateway == "razorpay",
+            models.EventRegistration.payment_status == "paid",
+            models.EventRegistration.payment_id == data.razorpay_payment_id,
+        )
+        .first()
+    )
+    if duplicate:
+        logger.warning(
+            "razorpay payment_id replay reg=%s payment_id=%s already_used_by=%s",
+            reg.id, data.razorpay_payment_id, duplicate.id,
+        )
+        raise HTTPException(status_code=400, detail="This payment has already been used.")
+
     try:
         ok = razorpay_gw.verify_payment_signature(
             db,
@@ -498,13 +703,17 @@ def razorpay_verify(
         raise HTTPException(status_code=400, detail="Payment signature could not be verified.")
 
     reg.payment_status = "paid"
-    reg.payment_reference = data.razorpay_payment_id
+    _set_payment_id(reg, data.razorpay_payment_id)
     reg.status = "confirmed"
     db.commit()
     db.refresh(reg)
 
     event = _get_event_or_404(db, reg.event_id)
     config = parse_config(event.registration_config)
+    # Generate the receipt before sending the confirmation email — the email
+    # body links to the booker's My Events tile, where the receipt button
+    # then lights up immediately.
+    _generate_event_receipt(event, reg, db)
     _send_confirmation_email(event, reg, config)
     db.commit()
 
@@ -571,6 +780,102 @@ def list_my_registrations(
     return out
 
 
+# ── User: receipt + invoice ────────────────────────────────────────────────
+
+@router.post("/events/registrations/{reg_id}/generate-receipt")
+def user_generate_event_receipt(
+    reg_id: int,
+    user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return the existing receipt path for a paid registration, or
+    (re)generate it if missing. Refuses for unpaid rows — receipts only
+    exist for actually-paid registrations.
+
+    Idempotent: calling it on an already-receipted row just returns the
+    existing path. The PDF on disk is overwritten on regen so the booker's
+    download URL stays stable.
+    """
+    reg = (
+        db.query(models.EventRegistration)
+        .filter(
+            models.EventRegistration.id == reg_id,
+            models.EventRegistration.user_id == user.id,
+        )
+        .first()
+    )
+    if not reg:
+        raise HTTPException(status_code=404, detail="Registration not found")
+    if reg.payment_status != "paid":
+        raise HTTPException(
+            status_code=400,
+            detail="Receipt is only available after payment is confirmed.",
+        )
+    event = _get_event_or_404(db, reg.event_id)
+    path = _generate_event_receipt(event, reg, db)
+    if not path:
+        raise HTTPException(status_code=500, detail="Could not generate receipt right now. Please try again shortly.")
+    db.commit()
+    return {"receipt_path": path}
+
+
+@router.post("/events/registrations/{reg_id}/generate-invoice")
+def user_generate_event_invoice(
+    reg_id: int,
+    user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """On-demand invoice generation for the booker. Like the consultation
+    flow we don't persist the path on the row — generation is cheap and
+    overwriting keeps the URL stable. Refuses for unpaid rows."""
+    reg = (
+        db.query(models.EventRegistration)
+        .filter(
+            models.EventRegistration.id == reg_id,
+            models.EventRegistration.user_id == user.id,
+        )
+        .first()
+    )
+    if not reg:
+        raise HTTPException(status_code=404, detail="Registration not found")
+    if reg.payment_status != "paid":
+        raise HTTPException(
+            status_code=400,
+            detail="Invoice is only available after payment is confirmed.",
+        )
+    event = _get_event_or_404(db, reg.event_id)
+    booker_name = None
+    if reg.attendee_role == "other":
+        booker = db.query(models.User).filter(models.User.id == reg.user_id).first()
+        booker_name = booker.name if booker else None
+    booked_on = (
+        reg.created_at.strftime("%d %B %Y")
+        if reg.created_at
+        else datetime.utcnow().strftime("%d %B %Y")
+    )
+    try:
+        from utils.pdf_event_invoice import generate_event_invoice
+        path = generate_event_invoice(
+            registration_id=reg.id,
+            event_id=event.id,
+            event_title=event.title,
+            tier_name=reg.tier_name,
+            attendee_name=reg.name or "",
+            attendee_email=reg.email,
+            attendee_mobile=reg.mobile,
+            fee_amount=int(reg.fee_amount or 0),
+            payment_gateway=reg.payment_gateway,
+            payment_id=reg.payment_id,
+            booked_on=booked_on,
+            attendee_role=reg.attendee_role or "self",
+            booker_name=booker_name,
+        )
+    except Exception as e:
+        logger.warning("event invoice generation failed reg=%s: %s", reg.id, e)
+        raise HTTPException(status_code=500, detail="Could not generate invoice right now. Please try again shortly.")
+    return {"invoice_path": path}
+
+
 # ── User: payment-status poll (after PhonePe redirect) ─────────────────────
 
 @router.get("/events/registrations/payment-status")
@@ -583,10 +888,14 @@ def event_payment_status(
     the registration by txn id, polls PhonePe for the latest state, and
     flips the row to confirmed on success — at which point the confirmation
     email goes out."""
+    # Look up by payment_order_id (the PhonePe merchant_order_id stamped at
+    # init time). Falls back to payment_reference for old rows that haven't
+    # been backfilled yet.
     reg = (
         db.query(models.EventRegistration)
         .filter(
-            models.EventRegistration.payment_reference == txn,
+            (models.EventRegistration.payment_order_id == txn)
+            | (models.EventRegistration.payment_reference == txn),
             models.EventRegistration.user_id == user.id,
         )
         .first()
@@ -604,12 +913,32 @@ def event_payment_status(
         return {"success": False, "state": "PENDING", "registration_id": reg.id}
 
     if status.get("success"):
+        # Amount-tamper defence: verify PhonePe actually charged the fee we
+        # snapshotted on the registration. If the user somehow got an order
+        # created for a smaller amount, we will NOT mark the registration
+        # paid even though PhonePe says COMPLETED.
+        expected_paise = int(reg.fee_amount or 0) * 100
+        actual_paise = int(status.get("amount_paise") or 0)
+        if expected_paise > 0 and actual_paise > 0 and actual_paise < expected_paise:
+            logger.error(
+                "phonepe event amount mismatch reg=%s txn=%s expected_paise=%s actual_paise=%s",
+                reg.id, txn, expected_paise, actual_paise,
+            )
+            return {"success": False, "state": "AMOUNT_MISMATCH", "registration_id": reg.id}
+
         reg.payment_status = "paid"
+        # PhonePe doesn't expose a separate payment_id distinct from the
+        # merchant_order_id — treat both as the same. payment_order_id is
+        # already set from init; populate payment_id with txn so replay
+        # defence has a value to match against, and keep payment_reference
+        # mirrored.
+        _set_payment_id(reg, txn)
         reg.status = "confirmed"
         db.commit()
         db.refresh(reg)
         event = _get_event_or_404(db, reg.event_id)
         config = parse_config(event.registration_config)
+        _generate_event_receipt(event, reg, db)
         _send_confirmation_email(event, reg, config)
         db.commit()
 
@@ -639,9 +968,20 @@ def admin_list_registrations(
 
 # ── Admin: confirm a manual-gateway registration after offline payment ─────
 
+class ManualConfirmRequest(BaseModel):
+    """Admin must record proof of the offline payment so the audit log isn't
+    just `event_registration_confirm_manual` with no context. `reference` is
+    free-form (UPI ref, cheque #, "cash receipt 042", etc.) and persisted on
+    the registration row; `note` is optional internal text shown on the
+    detail dialog."""
+    reference: str
+    note: Optional[str] = None
+
+
 @router.post("/admin/event-registrations/{reg_id}/confirm-manual")
 def admin_confirm_manual_payment(
     reg_id: int,
+    data: ManualConfirmRequest,
     admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
@@ -655,17 +995,38 @@ def admin_confirm_manual_payment(
         )
     if reg.status == "confirmed":
         return {"message": "Already confirmed."}
+
+    # Require a non-empty reference. Without this any moderator can flip a
+    # row to paid with no paper trail beyond the audit-log timestamp; if
+    # their account is compromised, that's a free backdoor.
+    reference = (data.reference or "").strip()
+    if len(reference) < 3:
+        raise HTTPException(
+            status_code=400,
+            detail="Please record a payment reference (UPI ref, cheque #, receipt #, etc.).",
+        )
+    if len(reference) > 200:
+        raise HTTPException(status_code=400, detail="Reference is too long (max 200 chars).")
+
     reg.payment_status = "paid"
+    # Manual reference becomes the payment_id (treat the admin-supplied
+    # value as the post-success identifier — there's no order_id step for
+    # offline payments). Mirror to payment_reference for legacy reads.
+    _set_payment_id(reg, reference)
     reg.status = "confirmed"
     db.commit()
     db.refresh(reg)
 
     event = _get_event_or_404(db, reg.event_id)
     config = parse_config(event.registration_config)
+    _generate_event_receipt(event, reg, db)
     _send_confirmation_email(event, reg, config)
     db.commit()
 
-    log_action(db, admin.id, "event_registration_confirm_manual", "event_registration", reg.id, "")
+    detail = f"ref={reference}"
+    if data.note:
+        detail += f" note={data.note[:120]}"
+    log_action(db, admin.id, "event_registration_confirm_manual", "event_registration", reg.id, detail)
     return {"message": "Registration confirmed."}
 
 

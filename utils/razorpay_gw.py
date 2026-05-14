@@ -114,9 +114,42 @@ def verify_payment_signature(
     return hmac.compare_digest(expected, razorpay_signature or "")
 
 
+def get_webhook_secret(db: Session) -> str:
+    """The Razorpay webhook secret is set in the dashboard separately from
+    the API key_secret. We persist it as `payment.razorpay.webhook_secret`
+    so it can be rotated through the admin UI without a redeploy.
+    Falls back to key_secret only when the dedicated webhook_secret is
+    blank — which is what Razorpay defaults to if the operator never
+    configures a webhook auth."""
+    from utils.site_settings import get_setting
+    val = (get_setting(db, "payment.razorpay.webhook_secret") or "").strip()
+    if val:
+        return val
+    creds = get_razorpay_credentials(db)
+    return creds.get("key_secret", "") or ""
+
+
+def verify_webhook_signature(
+    db: Session,
+    *,
+    raw_body: bytes,
+    signature_header: str,
+) -> bool:
+    """Razorpay signs the raw webhook body with the webhook secret using
+    HMAC-SHA256 (hex). Different from the checkout signature: payload here
+    is the entire request body, not order_id|payment_id."""
+    secret = get_webhook_secret(db)
+    if not secret:
+        raise RazorpayError("Razorpay webhook secret missing; cannot verify webhook.")
+    expected = hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, (signature_header or "").strip())
+
+
 __all__ = [
     "RazorpayError",
     "create_order",
     "verify_payment_signature",
+    "verify_webhook_signature",
+    "get_webhook_secret",
     "is_razorpay_configured",
 ]

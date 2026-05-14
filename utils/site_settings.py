@@ -34,6 +34,11 @@ DEFAULTS: dict[str, str] = {
     "booking_limit": "0",
     "booking_limit_deadline": "",
     "consultation_terms": DEFAULT_TERMS,
+    # Which gateway the booking flow uses to charge the consultation fee.
+    # Allowed values: "phonepe" | "razorpay". The frontend reads this from
+    # /settings/public to decide whether to redirect (PhonePe) or open the
+    # inline checkout popup (Razorpay).
+    "consultation_payment_gateway": "phonepe",
     # Social links
     "social_facebook": "",
     "social_instagram": "",
@@ -57,6 +62,7 @@ DEFAULTS: dict[str, str] = {
     "payment.phonepe.callback_password": "",
     "payment.razorpay.key_id":           "",
     "payment.razorpay.key_secret":       "",
+    "payment.razorpay.webhook_secret":   "",
     "payment.gpay.merchant_id":          "",
     "payment.gpay.api_key":              "",
 }

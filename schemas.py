@@ -106,7 +106,9 @@ class AppointmentOut(BaseModel):
     problem: str
     selfie_path: Optional[str]
     payment_status: str
-    payment_reference: Optional[str]
+    payment_order_id: Optional[str] = None
+    payment_id: Optional[str] = None
+    payment_reference: Optional[str]    # legacy, mirrors payment_id || payment_order_id
     status: str
     scheduled_date: Optional[str]
     scheduled_time: Optional[str]
@@ -201,6 +203,12 @@ class BulkAssignRequest(BaseModel):
     user_ids: list[int]
     gallery_doc_id: Optional[int] = None
     batch_label: Optional[str] = None      # "List: X" or "Bulk: N users"
+    # Optional per-batch description. When provided, overrides the gallery
+    # template's stored description on each generated Document so the
+    # assigned copy can carry context the template alone doesn't (which
+    # event/consultation/sadhna it relates to). Empty/blank → fall back to
+    # the template's description.
+    description: Optional[str] = None
 
 
 class BulkAssignResponse(BaseModel):
@@ -309,9 +317,21 @@ class EventRegistrationCreate(BaseModel):
     which are required. Unknown keys in `field_values` are silently dropped.
 
     `tier_id` is required when the event has tiers configured; ignored
-    otherwise (single-fee mode)."""
+    otherwise (single-fee mode).
+
+    `attendee_role` distinguishes self-registration ("self" — booker is the
+    attendee) from booking on behalf of someone else ("other"). Validated
+    server-side; anything else falls back to "self".
+
+    `reg_id`, when set, signals "retry payment for this existing pending row"
+    rather than "create a new registration". Used by the My Events Complete
+    Payment button so the server picks the correct row instead of guessing
+    when a booker has multiple pending registrations for the same event.
+    """
     field_values: dict
     tier_id: Optional[str] = None
+    attendee_role: Optional[str] = "self"
+    reg_id: Optional[int] = None
 
 
 class EventRegistrationOut(BaseModel):
@@ -325,10 +345,14 @@ class EventRegistrationOut(BaseModel):
     status: str
     payment_status: str
     payment_gateway: Optional[str] = None
-    payment_reference: Optional[str] = None
+    payment_order_id: Optional[str] = None
+    payment_id: Optional[str] = None
+    payment_reference: Optional[str] = None    # legacy, mirrors payment_id || payment_order_id
     fee_amount: int = 0
     tier_id: Optional[str] = None
     tier_name: Optional[str] = None
+    attendee_role: str = "self"
+    receipt_path: Optional[str] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
