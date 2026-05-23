@@ -1,5 +1,6 @@
 """Authenticated file proxy that replaces the public /uploads StaticFiles mount.
 
+
 Policy by path prefix:
     pitham/                    — public (banners, events, testimonials, gallery
                                   on the public Pitham page)
@@ -13,24 +14,32 @@ Policy by path prefix:
                                   admin / moderator. Doc gallery (templates) is
                                   admin-only.
 
+
 URLs are unchanged from the prior public mount, so no frontend code had to be
 touched. Existing `fileUrl(path)` helpers keep working.
 """
 
+
 import os
 import re
-from typing import Optional
+from typing import Optional, List
+
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+
 from database import get_db
 import models
-from utils.auth import COOKIE_NAME, decode_token
+from utils.auth import COOKIE_NAME, decode_token, get_current_user
+from utils.file_signing import sign_url, verify_signature, SIGNED_URL_TTL_SECONDS
+
 
 router = APIRouter(tags=["files"])
+
 
 # Resolve the canonical absolute path of the uploads directory once at import
 # time. We use this as the security floor for the path-traversal guard below —
@@ -39,6 +48,7 @@ router = APIRouter(tags=["files"])
 UPLOADS_ROOT = os.path.abspath("uploads")
 os.makedirs(UPLOADS_ROOT, exist_ok=True)
 
+
 # Filenames like receipt_42.pdf / invoice_42.pdf encode the appointment id,
 # which is what we use for ownership lookup since we don't persist the path
 # on the appointment row for these.
@@ -46,10 +56,14 @@ _RECEIPT_RE = re.compile(r"^receipt_(\d+)\.pdf$", re.IGNORECASE)
 _INVOICE_RE = re.compile(r"^invoice_(\d+)\.pdf$", re.IGNORECASE)
 
 
+
+
 # ── Auth helpers ────────────────────────────────────────────────────────────
+
 
 def _maybe_user(request: Request, db: Session) -> Optional[models.User]:
     """Resolve the calling user from cookie (preferred) or Bearer (legacy).
+
 
     Returns None on any failure — the caller decides whether to 401 or to
     treat as anonymous (public path). Never raises; corrupt tokens shouldn't
@@ -80,6 +94,8 @@ def _maybe_user(request: Request, db: Session) -> Optional[models.User]:
         return None
 
 
+
+
 def _is_staff(user: models.User) -> bool:
     """Admin OR moderator. We give all staff members read access to file
     contents — file-level section gating would be redundant given the API
@@ -87,7 +103,10 @@ def _is_staff(user: models.User) -> bool:
     return user.role in ("admin", "moderator")
 
 
+
+
 # ── Ownership lookups — does this user own the linked record? ──────────────
+
 
 def _user_owns_document(db: Session, user_id: int, db_path: str) -> bool:
     return (
@@ -96,6 +115,8 @@ def _user_owns_document(db: Session, user_id: int, db_path: str) -> bool:
         .first()
         is not None
     )
+
+
 
 
 def _user_owns_appt_file(db: Session, user_id: int, db_path: str) -> bool:
@@ -114,6 +135,8 @@ def _user_owns_appt_file(db: Session, user_id: int, db_path: str) -> bool:
         .first()
         is not None
     )
+
+
 
 
 def _user_owns_receipt_or_invoice(db: Session, user_id: int, filename: str) -> bool:
@@ -135,7 +158,10 @@ def _user_owns_receipt_or_invoice(db: Session, user_id: int, filename: str) -> b
     return appt is not None
 
 
+
+
 # ── The route ──────────────────────────────────────────────────────────────
+
 
 def _resolve(path: str) -> str:
     """Validate `path` and return the absolute filesystem path under uploads.
@@ -152,6 +178,8 @@ def _resolve(path: str) -> str:
     return requested
 
 
+
+
 def _serve(path: str, *, public: bool) -> FileResponse:
     response = FileResponse(path)
     if public:
@@ -165,28 +193,47 @@ def _serve(path: str, *, public: bool) -> FileResponse:
     return response
 
 
+
+
 @router.get("/uploads/{path:path}")
 def serve_upload(path: str, request: Request, db: Session = Depends(get_db)):
     requested = _resolve(path)
+
 
     # Normalise the relative path back to forward slashes for prefix checks +
     # DB lookups (paths are stored that way in the DB regardless of OS).
     rel = path.replace("\\", "/").lstrip("/")
     db_path = "uploads/" + rel
 
+
     # ── Public bucket: no auth required ────────────────────────────────────
     if rel.startswith("pitham/"):
         return _serve(requested, public=True)
+
+
+    # ── Signed-URL fast path ───────────────────────────────────────────────
+    # If the request carries a valid HMAC signature for this path + an
+    # unexpired exp claim, serve it without needing cookie/Bearer auth.
+    # This is how <img src=...> / <a href=...> work across a cross-origin
+    # deployment where the session cookie can't flow. Signature was
+    # produced by /files/sign which checked ownership at mint time.
+    sig = request.query_params.get("sig")
+    exp = request.query_params.get("exp")
+    if sig and exp and verify_signature(db_path, exp, sig):
+        return _serve(requested, public=False)
+
 
     # ── Everything below requires authentication ──────────────────────────
     user = _maybe_user(request, db)
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required")
 
+
     # Staff (admin/moderator) bypass — needed for review screens that show
     # any user's selfie / analysis / receipts.
     if _is_staff(user):
         return _serve(requested, public=False)
+
 
     # Broadcast images: any authenticated user. Recipients vary by list, but
     # the image is also rendered inside the broadcast email body, so there's
@@ -194,14 +241,17 @@ def serve_upload(path: str, request: Request, db: Session = Depends(get_db)):
     if rel.startswith("broadcasts/"):
         return _serve(requested, public=False)
 
+
     # Gallery (admin doc templates): admin/moderator only — already blocked
     # by the staff bypass above. Anonymous users can't reach here.
     if rel.startswith("gallery/"):
         raise HTTPException(status_code=403, detail="Forbidden")
 
+
     # Personal files: must own the linked record.
     if rel.startswith("documents/") and _user_owns_document(db, user.id, db_path):
         return _serve(requested, public=False)
+
 
     if (
         rel.startswith("selfies/")
@@ -209,11 +259,88 @@ def serve_upload(path: str, request: Request, db: Session = Depends(get_db)):
     ) and _user_owns_appt_file(db, user.id, db_path):
         return _serve(requested, public=False)
 
+
     if (rel.startswith("receipts/") or rel.startswith("invoices/")) and _user_owns_receipt_or_invoice(
         db, user.id, os.path.basename(rel)
     ):
         return _serve(requested, public=False)
 
+
     # Unknown bucket OR not the owner — 403, not 404, so the user knows the
     # file exists but they can't see it. (Bucket existence is not sensitive.)
     raise HTTPException(status_code=403, detail="Forbidden")
+
+
+
+
+# ── Signed URL minting ─────────────────────────────────────────────────────
+#
+# Frontend calls this to convert a batch of paths into signed URLs that
+# <img src> / <a href> can use directly. Each path is access-checked using
+# the same rules as the GET route — so a user requesting someone else's
+# selfie path gets the path silently dropped from the response.
+
+
+
+
+class SignRequest(BaseModel):
+    # Batched so the documents list / appointment detail view can ask for
+    # all its files in one round-trip instead of N requests.
+    paths: List[str]
+
+
+
+
+@router.post("/files/sign")
+def sign_files(
+    body: SignRequest,
+    user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return signed URLs for every path the caller is authorised to read.
+    Paths the caller can't read are silently omitted; the frontend should
+    fall back to a placeholder for missing entries.
+
+
+    The signature carries a 60-second expiry — short enough that a
+    forwarded URL doesn't keep working tomorrow. Re-sign on every
+    page mount."""
+    staff = _is_staff(user)
+    out: dict[str, dict] = {}
+    for raw in body.paths:
+        if not raw:
+            continue
+        rel = raw.replace("\\", "/").lstrip("/")
+        if rel.startswith("uploads/"):
+            rel = rel[len("uploads/"):]
+        # Defence-in-depth — same traversal block as the GET route.
+        try:
+            _resolve(rel)
+        except HTTPException:
+            continue
+        db_path = "uploads/" + rel
+
+
+        # Pitham bucket is fully public — sign anyway so the frontend has
+        # one code path, but it isn't strictly necessary.
+        allowed = False
+        if rel.startswith("pitham/"):
+            allowed = True
+        elif staff:
+            allowed = True
+        elif rel.startswith("broadcasts/"):
+            allowed = True
+        elif rel.startswith("documents/"):
+            allowed = _user_owns_document(db, user.id, db_path)
+        elif rel.startswith("selfies/") or rel.startswith("analysis/"):
+            allowed = _user_owns_appt_file(db, user.id, db_path)
+        elif rel.startswith("receipts/") or rel.startswith("invoices/"):
+            allowed = _user_owns_receipt_or_invoice(db, user.id, os.path.basename(rel))
+        # gallery/ stays admin-only — already covered by `staff`.
+
+
+        if not allowed:
+            continue
+        exp, sig = sign_url(db_path)
+        out[raw] = {"exp": exp, "sig": sig, "ttl": SIGNED_URL_TTL_SECONDS}
+    return out

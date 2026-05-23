@@ -10,18 +10,50 @@ Keys:
   consultation_terms     — HTML content for consultation T&C shown before booking
 """
 
+
 import bleach
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional
+
 
 from database import get_db
 import models
 from utils.auth import require_admin, require_super_admin, get_current_user
 from utils.audit import log_action
 from utils.site_settings import DEFAULTS, get_setting as _get, set_setting as _set
+from utils.url_safety import validate_external_url, UnsafeUrl
 from datetime import datetime
+
+
+
+
+_URL_SETTING_KEYS = {
+    "social_facebook",
+    "social_instagram",
+    "social_youtube",
+    "social_twitter",
+    "social_whatsapp",
+    "contact_map_url",
+}
+
+
+
+
+def _maybe_sanitize_social(key: str, value: str) -> str:
+    """For settings keys that are URL-shaped, run the scheme/private-host
+    scrub. Empty strings pass through (admin can clear a social link).
+    Non-URL settings (email, phone, address) pass through unchanged."""
+    if key not in _URL_SETTING_KEYS:
+        return value
+    if not value or not value.strip():
+        return ""
+    try:
+        return validate_external_url(value)
+    except UnsafeUrl as e:
+        raise HTTPException(status_code=400, detail=f"{key}: {e}")
+
 
 # Allowed HTML tags/attrs for consultation terms (rich text editor output)
 ALLOWED_TAGS = [
@@ -34,14 +66,19 @@ ALLOWED_ATTRS = {
     "span": ["style"],
 }
 
+
 router = APIRouter(tags=["settings"])
+
 
 # DEFAULTS + _get + _set live in utils/site_settings.py — re-imported above so all
 # call sites in this file (the moderator approval flow, public settings endpoint,
 # admin update) keep working with no other change.
 
 
+
+
 # ── Public: read settings (needed by frontend) ─────────────────────────────
+
 
 @router.get("/settings/public")
 def get_public_settings(db: Session = Depends(get_db)):
@@ -51,6 +88,7 @@ def get_public_settings(db: Session = Depends(get_db)):
     gateway = (_get(db, "consultation_payment_gateway") or "phonepe").strip().lower()
     if gateway not in ("phonepe", "razorpay"):
         gateway = "phonepe"
+
 
     return {
         "consultation_fee": int(_get(db, "consultation_fee") or DEFAULTS["consultation_fee"]),
@@ -73,7 +111,10 @@ def get_public_settings(db: Session = Depends(get_db)):
     }
 
 
+
+
 # ── Admin: read/write all settings ─────────────────────────────────────────
+
 
 class UpdateSettingsRequest(BaseModel):
     consultation_fee: Optional[int] = None
@@ -96,12 +137,16 @@ class UpdateSettingsRequest(BaseModel):
     social_whatsapp: Optional[str] = None
 
 
+
+
 @router.get("/admin/settings")
 def admin_get_settings(
     admin: models.User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     return {k: _get(db, k) for k in DEFAULTS}
+
+
 
 
 @router.put("/admin/settings")
@@ -129,7 +174,8 @@ def admin_update_settings(
                     "social_twitter", "social_whatsapp"]:
             val = getattr(data, key, None)
             if val is not None:
-                _set(db, key, val)
+                _set(db, key, _maybe_sanitize_social(key, val))
+
 
         # Pending approval: fee + T&C
         pending = {}
@@ -149,9 +195,11 @@ def admin_update_settings(
                        f"Pending: {', '.join(pending.keys())}")
             return {"message": "Booking settings saved. Fee/T&C submitted for super admin approval.", "pending": True}
 
+
         db.commit()
         log_action(db, admin.id, "update_settings", "settings", 0, "Booking settings updated")
         return {"message": "Settings updated"}
+
 
     # Super admin — apply directly
     if data.consultation_fee is not None:
@@ -177,18 +225,22 @@ def admin_update_settings(
     if data.consultation_terms is not None:
         sanitized = bleach.clean(data.consultation_terms, tags=ALLOWED_TAGS, attributes=ALLOWED_ATTRS, strip=True)
         _set(db, "consultation_terms", sanitized)
-    # Contact & Social — both roles can save directly
+    # Contact & Social — both roles can save directly. URL-shaped fields
+    # get the SSRF/XSS scrub; phone/email/address stay free-form.
     for key in ["contact_email", "contact_phone", "contact_address", "contact_map_url",
                 "social_facebook", "social_instagram", "social_youtube",
                 "social_twitter", "social_whatsapp"]:
         val = getattr(data, key, None)
         if val is not None:
-            _set(db, key, val)
+            _set(db, key, _maybe_sanitize_social(key, val))
     log_action(db, admin.id, "update_settings", "settings", 0, "Settings updated")
     return {"message": "Settings updated"}
 
 
+
+
 # ── Pending settings approval (super admin only) ─────────────────────────────
+
 
 @router.get("/admin/settings/pending")
 def get_pending_changes(
@@ -215,6 +267,8 @@ def get_pending_changes(
     ]
 
 
+
+
 @router.post("/admin/settings/pending/{change_id}/approve")
 def approve_change(
     change_id: int,
@@ -237,11 +291,14 @@ def approve_change(
     return {"message": f"Setting '{change.key}' approved and applied."}
 
 
+
+
 # ── Payment Gateway Secrets (super admin only) ─────────────────────────────
 # Stored as namespaced site_settings keys. The list of allowed keys is fixed
 # server-side so a stale frontend can't write arbitrary settings via this
 # endpoint. Resolution at runtime (DB → env fallback) lives in
 # utils/payment_secrets.py.
+
 
 PAYMENT_GATEWAY_KEYS = {
     "payment.phonepe.client_id",
@@ -258,15 +315,76 @@ PAYMENT_GATEWAY_KEYS = {
 }
 
 
+
+
+_MASK_PREFIX = "••••"
+
+
+
+
+def _mask_secret(value: str) -> str:
+    """Mask a stored secret for display. Shows the last 4 characters so a
+    super-admin can still verify which key/value is configured. Returns ""
+    for empty values so the form shows an empty input (no fake "stored")."""
+    if not value:
+        return ""
+    if len(value) <= 4:
+        # Tiny values are masked entirely — exposing 1-2 chars of a 4-char
+        # secret leaks the whole thing.
+        return _MASK_PREFIX
+    return f"{_MASK_PREFIX}{value[-4:]}"
+
+
+
+
 @router.get("/admin/payment-gateways")
 def get_payment_gateway_secrets(
     admin: models.User = Depends(require_super_admin),
     db: Session = Depends(get_db),
+    response: Response = None,
 ):
-    """Return the currently-stored secret values. Super admin already has
-    full access so we don't bother masking — masking on the wire creates the
-    illusion of a fresh write when the admin saves a pre-filled form."""
-    return {k: _get(db, k) or "" for k in PAYMENT_GATEWAY_KEYS}
+    """Return masked secret values. Even super-admins see only last-4
+    digits in the form — protects against screen-share leaks, DevTools
+    history, response caching, and over-the-shoulder reads.
+
+
+    To actually rotate a secret, the admin types a new value over the
+    masked placeholder; the PUT handler drops anything that still starts
+    with the mask prefix (i.e. wasn't edited). For full-value reveal use
+    /admin/payment-gateways/reveal/{key}.
+    """
+    if response is not None:
+        # Never let a proxy/CDN cache a payment-secrets response.
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+    return {k: _mask_secret(_get(db, k) or "") for k in PAYMENT_GATEWAY_KEYS}
+
+
+
+
+@router.post("/admin/payment-gateways/reveal/{key}")
+def reveal_payment_gateway_secret(
+    key: str,
+    admin: models.User = Depends(require_super_admin),
+    db: Session = Depends(get_db),
+    response: Response = None,
+):
+    """One-shot full-value reveal for a single secret. Used by the admin
+    form when the operator explicitly clicks "Show value" — every reveal
+    is audit-logged so post-incident forensics can answer "did anyone
+    read this key in the last 30 days?"."""
+    if key not in PAYMENT_GATEWAY_KEYS:
+        raise HTTPException(status_code=404, detail="Unknown setting key")
+    if response is not None:
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+    log_action(
+        db, admin.id, "reveal_payment_gateway_secret", "settings", 0,
+        f"key={key}",
+    )
+    return {"key": key, "value": _get(db, key) or ""}
+
+
 
 
 class PaymentGatewayUpdateRequest(BaseModel):
@@ -280,9 +398,13 @@ class PaymentGatewayUpdateRequest(BaseModel):
     clear: Optional[list[str]] = None
 
 
+
+
 # Some gateway secrets are well-formed (key_id is an alnum prefix etc.) — we
 # don't try to perfectly validate, but reject obviously bad input lengths.
 _MAX_SECRET_LENGTH = 2048
+
+
 
 
 @router.put("/admin/payment-gateways")
@@ -294,6 +416,7 @@ def update_payment_gateway_secrets(
     """Bulk update of namespaced payment.* settings. Unknown keys are
     silently dropped (defense-in-depth against a tampered frontend).
 
+
     Empty-string values are skipped unless the key is explicitly listed in
     `clear` — protects against a stale form silently wiping a live secret
     after a partial render or autofill."""
@@ -302,6 +425,7 @@ def update_payment_gateway_secrets(
     clear_set = {k for k in (data.clear or []) if k in PAYMENT_GATEWAY_KEYS}
     written = []
     skipped_empty = []
+    skipped_masked = []
     for key, value in data.values.items():
         if key not in PAYMENT_GATEWAY_KEYS:
             continue
@@ -311,6 +435,13 @@ def update_payment_gateway_secrets(
                 status_code=400,
                 detail=f"Value for {key} exceeds {_MAX_SECRET_LENGTH} characters",
             )
+        # The GET endpoint returns masked values (••••XXXX). If the admin
+        # didn't edit a field, the form re-submits the mask. Treat that as
+        # "no change" — without this guard the masked placeholder would
+        # overwrite the real secret on every save.
+        if text_value.startswith(_MASK_PREFIX):
+            skipped_masked.append(key)
+            continue
         if not text_value and key not in clear_set:
             # Empty without explicit clear → ignore. Caller wanted to leave
             # the existing value untouched.
@@ -327,7 +458,10 @@ def update_payment_gateway_secrets(
         "message": "Payment gateway secrets updated",
         "updated": written,
         "skipped_empty": skipped_empty,
+        "skipped_masked": skipped_masked,
     }
+
+
 
 
 @router.post("/admin/settings/pending/{change_id}/reject")

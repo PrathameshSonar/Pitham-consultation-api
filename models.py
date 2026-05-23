@@ -5,6 +5,8 @@ from datetime import datetime
 import enum
 
 
+
+
 class AppointmentStatus(str, enum.Enum):
     pending = "pending"
     payment_pending = "payment_pending"
@@ -13,21 +15,32 @@ class AppointmentStatus(str, enum.Enum):
     completed = "completed"
     cancelled = "cancelled"
     rescheduled = "rescheduled"
+    # Admin paused a scheduled appointment without cancelling. Slot + zoom
+    # link are cleared so they can be reused; row stays in the user's
+    # history with a clear "on hold" pill until admin assigns a new slot.
+    on_hold = "on_hold"
+
+
 
 
 class User(Base):
     __tablename__ = "users"
 
+
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(150), nullable=False)
     email = Column(String(150), unique=True, index=True, nullable=True)
     mobile = Column(String(20), unique=True, index=True, nullable=False)
-    dob = Column(String(20), nullable=False)          # date of birth
-    tob = Column(String(20), nullable=False)          # time of birth
-    birth_place = Column(String(150), nullable=False)
-    city = Column(String(100), nullable=False)
-    state = Column(String(100), nullable=False)
-    country = Column(String(100), nullable=False)
+    # Profile fields: nullable so a Google sign-up can land in the DB
+    # without forcing the user through a full astrology profile before
+    # they ever see the app. Booking flow requires these to be filled in
+    # at appointment-creation time (see /appointments POST).
+    dob = Column(String(20), nullable=True)           # date of birth
+    tob = Column(String(20), nullable=True)           # time of birth
+    birth_place = Column(String(150), nullable=True)
+    city = Column(String(100), nullable=True)
+    state = Column(String(100), nullable=True)
+    country = Column(String(100), nullable=True)
     hashed_password = Column(String(255), nullable=True)   # null for Google-only users
     google_id = Column(String(100), unique=True, nullable=True)
     role = Column(String(20), default="user")         # "user" | "admin" | "moderator"
@@ -47,14 +60,18 @@ class User(Base):
     notify_sms = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+
     appointments = relationship("Appointment", back_populates="user")
     documents = relationship("Document", back_populates="user", foreign_keys="Document.user_id")
     queries = relationship("Query", back_populates="user")
     recordings = relationship("Recording", back_populates="user")
 
 
+
+
 class Appointment(Base):
     __tablename__ = "appointments"
+
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
@@ -78,7 +95,11 @@ class Appointment(Base):
     scheduled_time = Column(String(20), nullable=True)
     zoom_link = Column(String(500), nullable=True)
     notes = Column(Text, nullable=True)                       # admin notes
-    analysis_path = Column(String(500), nullable=True)        # consultation analysis image/file
+    analysis_path = Column(String(500), nullable=True)        # legacy single-file column — kept for receipts/PDFs that reference it
+    # JSON-encoded list of additional analysis files. Multi-upload writes
+    # land here; readers should combine `analysis_path` (legacy) + this list.
+    # Stored as Text so MySQL <8 doesn't reject the JSON type.
+    analysis_files = Column(Text, nullable=True, default="[]")
     analysis_notes = Column(Text, nullable=True)
     recording_link = Column(String(500), nullable=True)      # zoom recording or video link
     receipt_path = Column(String(500), nullable=True)        # booking confirmation PDF
@@ -88,11 +109,15 @@ class Appointment(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+
     user = relationship("User", back_populates="appointments")
+
+
 
 
 class Document(Base):
     __tablename__ = "documents"
+
 
     id = Column(Integer, primary_key=True, index=True)
     # NULL user_id means this is a reusable gallery/template document
@@ -106,11 +131,15 @@ class Document(Base):
     batch_label = Column(String(200), nullable=True)            # e.g. "List: Morning Group"
     created_at = Column(DateTime, default=datetime.utcnow)
 
+
     user = relationship("User", back_populates="documents", foreign_keys=[user_id])
+
+
 
 
 class Query(Base):
     __tablename__ = "queries"
+
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
@@ -121,11 +150,15 @@ class Query(Base):
     status = Column(String(20), default="open")       # open | answered
     created_at = Column(DateTime, default=datetime.utcnow)
 
+
     user = relationship("User", back_populates="queries")
+
+
 
 
 class UserList(Base):
     __tablename__ = "user_lists"
+
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(150), nullable=False)
@@ -134,31 +167,42 @@ class UserList(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+
     members = relationship("UserListMember", back_populates="user_list", cascade="all, delete-orphan")
+
+
 
 
 class UserListMember(Base):
     __tablename__ = "user_list_members"
 
+
     id = Column(Integer, primary_key=True, index=True)
     user_list_id = Column(Integer, ForeignKey("user_lists.id", ondelete="CASCADE"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
 
+
     user_list = relationship("UserList", back_populates="members")
     user = relationship("User")
+
+
 
 
 class SiteSetting(Base):
     """Key-value store for admin-configurable settings."""
     __tablename__ = "site_settings"
 
+
     key = Column(String(100), primary_key=True)
     value = Column(Text, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+
+
 class Recording(Base):
     __tablename__ = "recordings"
+
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
@@ -167,11 +211,15 @@ class Recording(Base):
     zoom_recording_url = Column(String(500), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+
     user = relationship("User", back_populates="recordings")
+
+
 
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
+
 
     id = Column(Integer, primary_key=True, index=True)
     admin_id = Column(Integer, ForeignKey("users.id"), nullable=False)
@@ -182,9 +230,12 @@ class AuditLog(Base):
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
+
+
 class ConsultationFeedback(Base):
     """User-submitted feedback for a completed consultation."""
     __tablename__ = "consultation_feedback"
+
 
     id = Column(Integer, primary_key=True, index=True)
     appointment_id = Column(Integer, ForeignKey("appointments.id"), nullable=False, unique=True)
@@ -194,15 +245,22 @@ class ConsultationFeedback(Base):
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
+
+
 class Event(Base):
     """Upcoming Pitham events shown on the public /pitham page."""
     __tablename__ = "events"
 
+
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String(200), nullable=False)
     description = Column(Text, nullable=True)
-    event_date = Column(String(20), nullable=False, index=True)   # ISO date, e.g. "2026-05-12"
+    event_date = Column(String(20), nullable=False, index=True)   # ISO date, e.g. "2026-05-12" — first day
     event_time = Column(String(20), nullable=True)                # e.g. "18:30"
+    # Optional length-in-days for multi-day events (yajna spanning Mon→Thu).
+    # NULL or 1 = single-day. The frontend renders this as "12-15 May" or
+    # "12 May (4 days)" depending on context.
+    event_days = Column(Integer, nullable=True)
     location = Column(String(200), nullable=True)
     location_map_url = Column(String(500), nullable=True)         # Google Maps link for "navigate" button
     image_url = Column(String(500), nullable=True)                # external URL OR uploaded file path
@@ -215,10 +273,13 @@ class Event(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+
+
 class EventRegistration(Base):
     """One row per (event, user) signup. The configurable per-event form
     fields land in `field_values` as a JSON blob — the catalog (utils/event_fields)
     defines which keys can appear there.
+
 
     `status` is the lifecycle:
       pending_payment → user submitted, paid gateway not yet confirmed
@@ -228,9 +289,11 @@ class EventRegistration(Base):
     """
     __tablename__ = "event_registrations"
 
+
     id = Column(Integer, primary_key=True, index=True)
     event_id = Column(Integer, ForeignKey("events.id"), nullable=False, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+
 
     # Snapshot the canonical contact fields at registration time so admin views
     # don't need a join to display "who registered" — and so renaming a user
@@ -239,9 +302,11 @@ class EventRegistration(Base):
     email = Column(String(150), nullable=True)
     mobile = Column(String(20), nullable=True)
 
+
     # All other configurable fields (dob, tob, problem_statement, etc.) land
     # here as a small JSON object keyed by catalog field key.
     field_values = Column(Text, nullable=True)
+
 
     status = Column(String(30), default="pending_payment", nullable=False, index=True)
     payment_status = Column(String(20), default="pending", nullable=False)  # pending | paid | refunded | n/a
@@ -258,11 +323,13 @@ class EventRegistration(Base):
     payment_reference = Column(String(150), nullable=True)     # legacy: mirrors payment_id || payment_order_id
     fee_amount = Column(Integer, default=0, nullable=False)    # snapshot of fee at registration time
 
+
     # Tier (registration option) snapshot. NULL when the event has no tiers
     # configured — the simple single-fee mode. tier_name is denormalised so
     # admin views render fast and renaming a tier later doesn't rewrite history.
     tier_id = Column(String(64), nullable=True, index=True)
     tier_name = Column(String(150), nullable=True)
+
 
     # "self" → the booker is registering themselves. snapshot fields equal
     #          the booker's profile.
@@ -272,9 +339,11 @@ class EventRegistration(Base):
     # Default "self" so existing rows make sense post-migration.
     attendee_role = Column(String(20), default="self", nullable=False)
 
+
     confirmation_sent_at = Column(DateTime, nullable=True)
     cancelled_at = Column(DateTime, nullable=True)
     attended_at = Column(DateTime, nullable=True)
+
 
     # Path to the auto-generated payment receipt PDF. Populated the moment
     # the row flips to paid (any of: razorpay verify, razorpay webhook,
@@ -282,13 +351,17 @@ class EventRegistration(Base):
     # downloads it from My Events; mirrors the consultation receipt flow.
     receipt_path = Column(String(500), nullable=True)
 
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 
 
 class Testimonial(Base):
     """Devotee testimonials shown on the public /pitham page."""
     __tablename__ = "testimonials"
+
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(150), nullable=False)
@@ -302,11 +375,14 @@ class Testimonial(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+
+
 class Broadcast(Base):
     """Admin/moderator-authored notification sent to all users or a specific user list.
     Optionally carries an image attachment. Each user tracks their own read state via
     BroadcastRead (no row = unread)."""
     __tablename__ = "broadcasts"
+
 
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String(200), nullable=False)
@@ -318,18 +394,24 @@ class Broadcast(Base):
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
+
+
 class BroadcastRead(Base):
     """Per-user read receipt for a broadcast. Presence = read."""
     __tablename__ = "broadcast_reads"
+
 
     broadcast_id = Column(Integer, ForeignKey("broadcasts.id", ondelete="CASCADE"), primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
     read_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+
+
 class PithamMedia(Base):
     """Banners, videos/podcasts, and Instagram posts shown on the public /pitham page."""
     __tablename__ = "pitham_media"
+
 
     id = Column(Integer, primary_key=True, index=True)
     kind = Column(String(20), nullable=False, index=True)         # "banner" | "video" | "instagram"
@@ -343,9 +425,12 @@ class PithamMedia(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+
+
 class PendingSettingChange(Base):
     """Settings changes submitted by moderators, awaiting super admin approval."""
     __tablename__ = "pending_setting_changes"
+
 
     id = Column(Integer, primary_key=True, index=True)
     submitted_by = Column(Integer, ForeignKey("users.id"), nullable=False)

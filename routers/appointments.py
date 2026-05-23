@@ -9,15 +9,18 @@ import bleach
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import List, Optional
 import uuid
 
+
 from database import get_db
 import models
 import schemas
-from utils.auth import get_current_user, require_admin, require_super_admin
+from utils.auth import get_current_user, require_admin, require_super_admin, require_email_verified
 from utils.permissions import require_section
+
 
 # Section gate for every admin endpoint in this router. Adding a new admin
 # section is a one-line change in utils/permissions.ADMIN_SECTIONS.
@@ -26,8 +29,26 @@ from utils.audit import log_action
 from utils.email import send_appointment_confirmation, send_reschedule_notification, send_completion_notification
 from utils.zoom import create_meeting as zoom_create_meeting, ZoomError
 from utils.site_settings import get_setting
+from utils.url_safety import validate_external_url, UnsafeUrl
+
+
+
+
+def _sanitize_zoom_link(raw: Optional[str]) -> Optional[str]:
+    """Reject obviously unsafe zoom-link values. Plain blank → None.
+    Admin sets this field when scheduling/rescheduling and the URL is
+    rendered as a clickable href in confirmation emails — javascript:
+    payloads here would be a stored XSS into every recipient's inbox."""
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return validate_external_url(raw)
+    except UnsafeUrl as e:
+        raise HTTPException(status_code=400, detail=f"zoom_link: {e}")
+
 
 router = APIRouter(tags=["appointments"])
+
 
 UPLOAD_DIR = "uploads/selfies"
 ANALYSIS_DIR = "uploads/analysis"
@@ -37,7 +58,10 @@ os.makedirs(ANALYSIS_DIR, exist_ok=True)
 os.makedirs(ASSIGNED_DIR, exist_ok=True)
 
 
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _check_slot_conflict(
     db: Session, appt_id: int, date: str, time: str
@@ -63,7 +87,10 @@ def _check_slot_conflict(
         )
 
 
+
+
 # ── User: book appointment ─────────────────────────────────────────────────────
+
 
 def _check_booking_allowed(db: Session):
     """Check admin settings: booking enabled, limit, deadline."""
@@ -72,6 +99,7 @@ def _check_booking_allowed(db: Session):
         msg_row = db.query(models.SiteSetting).filter(models.SiteSetting.key == "booking_hold_message").first()
         detail = msg_row.value if msg_row and msg_row.value else "Consultation booking is currently on hold."
         raise HTTPException(status_code=403, detail=detail)
+
 
     deadline_row = db.query(models.SiteSetting).filter(models.SiteSetting.key == "booking_limit_deadline").first()
     if deadline_row and deadline_row.value:
@@ -83,6 +111,7 @@ def _check_booking_allowed(db: Session):
                 raise HTTPException(status_code=403, detail="Booking deadline has passed.")
         except ValueError:
             pass
+
 
     limit_row = db.query(models.SiteSetting).filter(models.SiteSetting.key == "booking_limit").first()
     if limit_row and limit_row.value:
@@ -102,8 +131,12 @@ def _check_booking_allowed(db: Session):
                 raise HTTPException(status_code=403, detail="Booking limit reached. Please try again later.")
 
 
+
+
 def _clean(val: str) -> str:
     return bleach.clean(val.strip(), tags=[], strip=True) if val else ""
+
+
 
 
 @router.post("/appointments", response_model=schemas.AppointmentOut)
@@ -116,10 +149,14 @@ async def book_appointment(
     birth_place: str = Form(...),
     problem: str = Form(...),
     selfie: Optional[UploadFile] = File(None),
-    user: models.User = Depends(get_current_user),
+    # require_email_verified gates booking behind email verification. Google
+    # users + mobile-only users bypass; classic-signup users with an
+    # unverified email get a 403 with a "please verify" message.
+    user: models.User = Depends(require_email_verified),
     db: Session = Depends(get_db),
 ):
     _check_booking_allowed(db)
+
 
     # Email-verification gate: if the account has an email on file, it must
     # be verified before they can book. Mobile-only accounts (no email at
@@ -131,6 +168,7 @@ async def book_appointment(
             detail="Please verify your email before booking. Check your inbox or resend the verification email from your profile.",
         )
 
+
     # Sanitize all inputs
     name = _clean(name)
     email = _clean(email)
@@ -140,10 +178,12 @@ async def book_appointment(
     birth_place = _clean(birth_place)
     problem = _clean(problem)
 
+
     if len(name) < 2:
         raise HTTPException(status_code=400, detail="Name is required")
     if len(problem) < 5:
         raise HTTPException(status_code=400, detail="Please describe your problem")
+
 
     selfie_path = None
     if selfie and selfie.filename:
@@ -162,11 +202,13 @@ async def book_appointment(
         async with aiofiles.open(selfie_path, "wb") as f:
             await f.write(content)
 
+
     # Snapshot the current T&C so the user's agreed version is preserved
     terms_row = db.query(models.SiteSetting).filter(
         models.SiteSetting.key == "consultation_terms"
     ).first()
     agreed_terms = terms_row.value if terms_row else ""
+
 
     appt = models.Appointment(
         user_id=user.id,
@@ -186,7 +228,10 @@ async def book_appointment(
     return appt
 
 
+
+
 # ── User: my appointments ──────────────────────────────────────────────────────
+
 
 @router.get("/appointments/my", response_model=List[schemas.AppointmentOut])
 def my_appointments(
@@ -201,7 +246,10 @@ def my_appointments(
     )
 
 
+
+
 # ── User: download .ics calendar file ─────────────────────────────────────────
+
 
 @router.get("/appointments/{appt_id}/calendar")
 def user_download_ics(
@@ -217,6 +265,7 @@ def user_download_ics(
     )
     if not appt or not appt.scheduled_date or not appt.scheduled_time:
         raise HTTPException(status_code=404, detail="No scheduled date/time found")
+
 
     dt_start = f"{appt.scheduled_date.replace('-', '')}T{appt.scheduled_time.replace(':', '')}00"
     ics = (
@@ -235,7 +284,10 @@ def user_download_ics(
     )
 
 
+
+
 # ── User: cancel own unpaid appointment ──────────────────────────────────────
+
 
 @router.delete("/appointments/{appt_id}")
 def cancel_appointment(
@@ -255,12 +307,16 @@ def cancel_appointment(
     if appt.status == "completed":
         raise HTTPException(status_code=400, detail="Cannot cancel a completed appointment.")
 
+
     db.delete(appt)
     db.commit()
     return {"message": "Appointment cancelled and removed."}
 
 
+
+
 # ── User: generate receipt for own appointment ────────────────────────────────
+
 
 @router.post("/appointments/{appt_id}/generate-receipt")
 def user_generate_receipt(
@@ -269,6 +325,7 @@ def user_generate_receipt(
     db: Session = Depends(get_db),
 ):
     from utils.pdf_receipt import generate_receipt as gen_receipt
+
 
     appt = (
         db.query(models.Appointment)
@@ -280,10 +337,13 @@ def user_generate_receipt(
     if appt.payment_status != "paid":
         raise HTTPException(status_code=400, detail="Payment not verified yet")
 
+
     fee = get_setting(db, "consultation_fee")
+
 
     # Use the T&C the user agreed to at booking time
     terms_html = appt.agreed_terms or ""
+
 
     receipt_path = gen_receipt(
         appointment_id=appt.id,
@@ -304,7 +364,10 @@ def user_generate_receipt(
     return {"message": "Receipt generated", "receipt_path": receipt_path}
 
 
+
+
 # ── User: generate invoice for own appointment ────────────────────────────────
+
 
 @router.post("/appointments/{appt_id}/generate-invoice")
 def user_generate_invoice(
@@ -313,6 +376,7 @@ def user_generate_invoice(
     db: Session = Depends(get_db),
 ):
     from utils.pdf_invoice import generate_invoice
+
 
     appt = (
         db.query(models.Appointment)
@@ -324,8 +388,10 @@ def user_generate_invoice(
     if appt.payment_status != "paid":
         raise HTTPException(status_code=400, detail="Payment not verified yet")
 
+
     fee = get_setting(db, "consultation_fee")
     terms_html = appt.agreed_terms or get_setting(db, "consultation_terms") or ""
+
 
     invoice_path = generate_invoice(
         appointment_id=appt.id,
@@ -340,7 +406,10 @@ def user_generate_invoice(
     return {"message": "Invoice generated", "invoice_path": invoice_path}
 
 
+
+
 # ── Admin: all appointments ────────────────────────────────────────────────────
+
 
 @router.get("/admin/appointments", response_model=List[schemas.AppointmentOut])
 def all_appointments(
@@ -350,7 +419,15 @@ def all_appointments(
     return db.query(models.Appointment).order_by(models.Appointment.created_at.desc()).all()
 
 
+
+
 # ── Admin: verify payment ──────────────────────────────────────────────────────
+
+
+_MANUAL_PAYMENT_REF_PREFIXES = ("pay_", "SPBSP_", "OMO", "T", "OFFLINE_")
+
+
+
 
 @router.put("/admin/appointments/{appt_id}/verify-payment")
 def verify_payment(
@@ -359,18 +436,74 @@ def verify_payment(
     admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
 ):
+    """Manual payment verification — used only when the gateway webhook
+    didn't land (e.g. user paid by bank transfer, or webhook failed).
+
+
+    Defences:
+      - Refuse if already paid (don't overwrite a real gateway confirmation
+        with a manual one — that erases the verifiable payment_id).
+      - Refuse on terminal states (cancelled / completed).
+      - Validate the reference looks like a real payment id or an explicit
+        OFFLINE_ tag — stops admins from typing "ok" / "done" / "" as proof.
+      - Require a written reason; both reason and reference are logged to
+        the audit trail so we can answer "why was this marked paid" later.
+    """
     appt = db.query(models.Appointment).filter(models.Appointment.id == appt_id).first()
     if not appt:
         raise HTTPException(status_code=404, detail="Appointment not found")
 
+
+    if appt.payment_status == "paid":
+        raise HTTPException(
+            status_code=400,
+            detail="Appointment is already marked paid. Use a different action.",
+        )
+    if appt.status in (
+        models.AppointmentStatus.cancelled,
+        models.AppointmentStatus.completed,
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot manually verify payment for a cancelled or completed appointment.",
+        )
+
+
+    ref = (data.payment_reference or "").strip()
+    reason = (data.reason or "").strip()
+    if len(ref) < 6 or not ref.startswith(_MANUAL_PAYMENT_REF_PREFIXES):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Payment reference must be a real gateway id (pay_/SPBSP_/PhonePe txn) "
+                "or explicitly prefixed OFFLINE_ for out-of-band transfers."
+            ),
+        )
+    if len(reason) < 10:
+        raise HTTPException(
+            status_code=400,
+            detail="Please provide a reason (min 10 chars) for manual verification.",
+        )
+
+
     appt.payment_status = "paid"
-    appt.payment_reference = data.payment_reference
+    appt.payment_reference = ref
+    # Don't touch payment_id — that's reserved for real gateway-confirmed
+    # payments. Manual verification leaves it null so audit queries can
+    # distinguish "webhook-confirmed" from "admin-manually-marked-paid".
     appt.status = models.AppointmentStatus.payment_verified
+    log_action(
+        db, admin.id, "verify_payment_manual", "appointment", appt.id,
+        f"ref={ref} reason={reason}",
+    )
     db.commit()
     return {"message": "Payment verified"}
 
 
+
+
 # ── Admin: assign time slot + zoom link ───────────────────────────────────────
+
 
 @router.put("/admin/appointments/{appt_id}/assign-slot")
 def assign_slot(
@@ -383,17 +516,24 @@ def assign_slot(
     if not appt:
         raise HTTPException(status_code=404, detail="Appointment not found")
 
+
     _check_slot_conflict(db, appt_id, data.scheduled_date, data.scheduled_time)
+
+
+    safe_zoom = _sanitize_zoom_link(data.zoom_link)
+
 
     appt.scheduled_date = data.scheduled_date
     appt.scheduled_time = data.scheduled_time
-    appt.zoom_link = data.zoom_link
+    appt.zoom_link = safe_zoom
     appt.notes = data.notes
     appt.status = models.AppointmentStatus.scheduled
     db.commit()
 
+
     log_action(db, admin.id, "assign_slot", "appointment", appt.id,
                f"Date: {data.scheduled_date}, Time: {data.scheduled_time}")
+
 
     user = db.query(models.User).filter(models.User.id == appt.user_id).first()
     if user:
@@ -403,13 +543,16 @@ def assign_slot(
             name=user.name,
             scheduled_date=data.scheduled_date,
             scheduled_time=data.scheduled_time,
-            zoom_link=data.zoom_link,
+            zoom_link=safe_zoom or "",
             appointment_id=appt.id,
         )
     return {"message": "Slot assigned and email sent"}
 
 
+
+
 # ── Admin: reschedule ──────────────────────────────────────────────────────────
+
 
 @router.put("/admin/appointments/{appt_id}/reschedule")
 def reschedule(
@@ -422,17 +565,21 @@ def reschedule(
     if not appt:
         raise HTTPException(status_code=404, detail="Appointment not found")
 
+
     _check_slot_conflict(db, appt_id, data.scheduled_date, data.scheduled_time)
+
 
     appt.scheduled_date = data.scheduled_date
     appt.scheduled_time = data.scheduled_time
     if data.zoom_link:
-        appt.zoom_link = data.zoom_link
+        appt.zoom_link = _sanitize_zoom_link(data.zoom_link)
     appt.status = models.AppointmentStatus.rescheduled
     db.commit()
 
+
     log_action(db, admin.id, "reschedule", "appointment", appt.id,
                f"New date: {data.scheduled_date}, Time: {data.scheduled_time}")
+
 
     user = db.query(models.User).filter(models.User.id == appt.user_id).first()
     if user:
@@ -448,7 +595,10 @@ def reschedule(
     return {"message": "Appointment rescheduled and email sent"}
 
 
+
+
 # ── Admin: mark as completed (optionally with analysis file) ──────────────────
+
 
 @router.post("/admin/appointments/{appt_id}/complete")
 async def mark_completed(
@@ -456,6 +606,11 @@ async def mark_completed(
     analysis_notes: str = Form(""),
     recording_link: str = Form(""),
     gallery_doc_ids: str = Form(""),          # JSON array: "[1,2,3]"
+    # Multi-upload: admin can attach any number of analysis documents.
+    # Backward compat: the legacy single-file endpoint used `analysis_file`,
+    # so we accept either name. New uploads always APPEND to whatever's
+    # already stored — admin may add files in follow-up edits.
+    analysis_files: List[UploadFile] = File([]),
     analysis_file: Optional[UploadFile] = File(None),
     admin: models.User = Depends(_section_admin),
     db: Session = Depends(get_db),
@@ -464,22 +619,58 @@ async def mark_completed(
     if not appt:
         raise HTTPException(status_code=404, detail="Appointment not found")
 
+
+    # Normalise inputs — accept both new (list) and legacy (single) field names.
+    incoming: List[UploadFile] = []
+    if analysis_files:
+        incoming.extend([f for f in analysis_files if f and f.filename])
     if analysis_file and analysis_file.filename:
-        content = await analysis_file.read()
-        if len(content) > 10 * 1024 * 1024:
-            raise HTTPException(status_code=400, detail="Analysis file must be under 10MB.")
-        safe_name = re.sub(r"[^\w.\-]", "_", analysis_file.filename)
-        filename = f"{appt.id}_{safe_name}"
-        path = os.path.join(ANALYSIS_DIR, filename)
-        async with aiofiles.open(path, "wb") as f:
-            await f.write(content)
-        appt.analysis_path = path
+        incoming.append(analysis_file)
+
+
+    if incoming:
+        # Existing list (JSON) — fall back to empty if column is null / not-yet-migrated.
+        try:
+            stored = json.loads(appt.analysis_files or "[]")
+            if not isinstance(stored, list):
+                stored = []
+        except (json.JSONDecodeError, TypeError):
+            stored = []
+
+
+        saved_now: List[str] = []
+        for up in incoming:
+            content = await up.read()
+            if len(content) > 10 * 1024 * 1024:
+                raise HTTPException(status_code=400, detail=f"Analysis file '{up.filename}' must be under 10MB.")
+            safe_name = re.sub(r"[^\w.\-]", "_", up.filename or "file")
+            # uuid suffix so an admin re-uploading the same name doesn't
+            # clobber the previous file or land in the same path.
+            filename = f"{appt.id}_{uuid.uuid4().hex[:8]}_{safe_name}"
+            path = os.path.join(ANALYSIS_DIR, filename)
+            async with aiofiles.open(path, "wb") as f:
+                await f.write(content)
+            saved_now.append(path)
+
+
+        # First file in this upload (if legacy column is empty) becomes the
+        # primary `analysis_path` so receipts / single-file consumers still
+        # find a value. Everything else goes into the list.
+        if saved_now and not appt.analysis_path:
+            appt.analysis_path = saved_now[0]
+            extras = saved_now[1:]
+        else:
+            extras = saved_now
+        appt.analysis_files = json.dumps(stored + extras, separators=(",", ":"))
+
 
     if analysis_notes:
         appt.analysis_notes = analysis_notes
 
+
     if recording_link:
         appt.recording_link = recording_link
+
 
     # Assign sadhna documents from gallery to the user
     if gallery_doc_ids:
@@ -516,10 +707,13 @@ async def mark_completed(
         except (json.JSONDecodeError, TypeError):
             pass
 
+
     appt.status = models.AppointmentStatus.completed
     db.commit()
 
+
     log_action(db, admin.id, "mark_completed", "appointment", appt.id, f"For: {appt.name}")
+
 
     # Send completion email
     try:
@@ -534,10 +728,176 @@ async def mark_completed(
     except Exception:
         pass
 
+
     return {"message": "Appointment marked as completed"}
 
 
+
+
+# ── Admin: hold a scheduled appointment ───────────────────────────────────
+#
+# Used when a slot needs to free up at short notice but the appointment
+# shouldn't be cancelled outright. Clears the date/time/zoom_link so other
+# bookings can claim the slot; status flips to on_hold. Admin can then
+# pick a new slot via the existing assign-slot flow.
+
+
+class HoldAppointmentRequest(BaseModel):
+    reason: Optional[str] = None
+
+
+
+
+@router.put("/admin/appointments/{appt_id}/hold")
+def admin_hold_appointment(
+    appt_id: int,
+    data: HoldAppointmentRequest,
+    admin: models.User = Depends(_section_admin),
+    db: Session = Depends(get_db),
+):
+    appt = db.query(models.Appointment).filter(models.Appointment.id == appt_id).first()
+    if not appt:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+    if appt.status in ("completed", "cancelled"):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot hold a completed or cancelled appointment.",
+        )
+    if appt.payment_status != "paid":
+        raise HTTPException(
+            status_code=400,
+            detail="Only paid bookings can be put on hold. Unpaid ones live in Payment Pending.",
+        )
+
+
+    # Free the slot. Keep the booking row + payment record intact so the
+    # admin can reassign without re-collecting payment.
+    appt.scheduled_date = None
+    appt.scheduled_time = None
+    appt.zoom_link = None
+    appt.status = models.AppointmentStatus.on_hold
+    db.commit()
+
+
+    log_action(
+        db, admin.id, "hold_appointment", "appointment", appt.id,
+        f"reason={(data.reason or '').strip()[:200]}",
+    )
+
+
+    # Best-effort user notification — don't fail the hold if mail breaks.
+    try:
+        from utils.email import send_email
+        send_email(
+            to=appt.email,
+            subject="Consultation on Hold — SPBSP, Ahilyanagar",
+            html_body=f"""
+            <div style="font-family:'Poppins',sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#3D2817">
+              <h3>Namaste {appt.name},</h3>
+              <p>Your consultation <strong>SPBSP-{appt.id}</strong> has been put on hold by the admin.</p>
+              <p>{(data.reason or 'A new slot will be assigned to you shortly. No action needed from your side.')}</p>
+              <p>Regards,<br><strong>Shri Pitambara Baglamukhi Shakti Pitham, Ahilyanagar</strong></p>
+            </div>
+            """,
+        )
+    except Exception:
+        pass
+
+
+    return {"message": "Appointment placed on hold. Slot is now free for reassignment."}
+
+
+
+
+# ── Admin: download appointment details as PDF ───────────────────────────────
+
+
+@router.get("/admin/appointments/{appt_id}/details-pdf")
+def admin_download_details_pdf(
+    appt_id: int,
+    admin: models.User = Depends(_section_admin),
+    db: Session = Depends(get_db),
+):
+    """Self-contained PDF with the booking summary + selfie + (for completed
+    consultations) analysis notes and any uploaded analysis files. Admin
+    shares this with Guruji ahead of / after the session.
+
+
+    Filename matches the user's spec: `<name>_<date>_<time>.pdf`. Special
+    characters are stripped so the filename is filesystem-safe and the
+    Content-Disposition header doesn't need quoting.
+    """
+    from utils.pdf_appointment_detail import build_appointment_detail_pdf
+
+
+    appt = db.query(models.Appointment).filter(models.Appointment.id == appt_id).first()
+    if not appt:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+
+
+    # Combine legacy single-file + new multi-upload list. Drop empty
+    # entries; keep file order so the PDF reads in the upload sequence.
+    extras: List[str] = []
+    if appt.analysis_files:
+        try:
+            parsed = json.loads(appt.analysis_files)
+            if isinstance(parsed, list):
+                extras = [str(p) for p in parsed if p]
+        except (json.JSONDecodeError, TypeError):
+            extras = []
+    analysis_paths: List[str] = []
+    if appt.analysis_path:
+        analysis_paths.append(appt.analysis_path)
+    analysis_paths.extend([p for p in extras if p != appt.analysis_path])
+
+
+    pdf_bytes = build_appointment_detail_pdf(
+        appointment_id=appt.id,
+        name=appt.name,
+        email=appt.email or "",
+        mobile=appt.mobile or "",
+        dob=appt.dob or "",
+        tob=appt.tob or "",
+        birth_place=appt.birth_place or "",
+        problem=appt.problem or "",
+        booked_on=appt.created_at.strftime("%d/%m/%Y %H:%M") if appt.created_at else "",
+        scheduled_date=appt.scheduled_date,
+        scheduled_time=appt.scheduled_time,
+        status=appt.status or "",
+        selfie_path=appt.selfie_path,
+        analysis_notes=appt.analysis_notes,
+        analysis_paths=analysis_paths,
+    )
+
+
+    # Filename: <user_name>_<appt_date>_<appt_time>.pdf. Falls back to
+    # booking-date if scheduled hasn't been set. Strip non-alnum so the
+    # browser doesn't have to URL-encode anything.
+    safe_name = re.sub(r"[^\w\-]+", "_", appt.name or "consultation").strip("_") or "consultation"
+    date_part = appt.scheduled_date or (appt.created_at.strftime("%Y-%m-%d") if appt.created_at else "")
+    time_part = (appt.scheduled_time or "").replace(":", "-")
+    parts = [safe_name]
+    if date_part:
+        parts.append(date_part)
+    if time_part:
+        parts.append(time_part)
+    filename = "_".join(parts) + ".pdf"
+
+
+    log_action(db, admin.id, "download_details_pdf", "appointment", appt.id, filename)
+
+
+    return StreamingResponse(
+        iter([pdf_bytes]),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+
+
 # ── Admin: cancel any appointment (no refund) ─────────────────────────────────
+
 
 @router.delete("/admin/appointments/{appt_id}")
 def admin_cancel_appointment(
@@ -551,12 +911,15 @@ def admin_cancel_appointment(
     if appt.status == "completed":
         raise HTTPException(status_code=400, detail="Cannot cancel a completed appointment.")
 
+
     name = appt.name
     appt.status = models.AppointmentStatus.cancelled
     db.commit()
 
+
     log_action(db, admin.id, "cancel_appointment", "appointment", appt.id,
                f"Cancelled: {name} (no refund)")
+
 
     # Notify user
     try:
@@ -577,10 +940,14 @@ def admin_cancel_appointment(
     except Exception:
         pass
 
+
     return {"message": "Appointment cancelled. No refund as per policy."}
 
 
+
+
 # ── Admin: generate/regenerate receipt PDF ────────────────────────────────────
+
 
 @router.post("/admin/appointments/{appt_id}/generate-receipt")
 def admin_generate_receipt(
@@ -590,14 +957,18 @@ def admin_generate_receipt(
 ):
     from utils.pdf_receipt import generate_receipt
 
+
     appt = db.query(models.Appointment).filter(models.Appointment.id == appt_id).first()
     if not appt:
         raise HTTPException(status_code=404, detail="Appointment not found")
 
+
     fee = get_setting(db, "consultation_fee")
+
 
     # Use the T&C the user agreed to at booking time
     terms_html = appt.agreed_terms or ""
+
 
     receipt_path = generate_receipt(
         appointment_id=appt.id,
@@ -618,7 +989,10 @@ def admin_generate_receipt(
     return {"message": "Receipt generated", "receipt_path": receipt_path}
 
 
+
+
 # ── Admin: generate CA invoice / bill receipt ─────────────────────────────────
+
 
 @router.post("/admin/appointments/{appt_id}/generate-invoice")
 def admin_generate_invoice(
@@ -628,12 +1002,15 @@ def admin_generate_invoice(
 ):
     from utils.pdf_invoice import generate_invoice
 
+
     appt = db.query(models.Appointment).filter(models.Appointment.id == appt_id).first()
     if not appt:
         raise HTTPException(status_code=404, detail="Appointment not found")
 
+
     fee = get_setting(db, "consultation_fee")
     terms_html = appt.agreed_terms or get_setting(db, "consultation_terms") or ""
+
 
     invoice_path = generate_invoice(
         appointment_id=appt.id,
@@ -648,7 +1025,10 @@ def admin_generate_invoice(
     return {"message": "Invoice generated", "invoice_path": invoice_path}
 
 
+
+
 # ── Admin: bulk download invoices as zip (date filter) ────────────────────────
+
 
 @router.get("/admin/invoices/download")
 def admin_download_invoices(
@@ -659,11 +1039,13 @@ def admin_download_invoices(
 ):
     from utils.pdf_invoice import generate_invoice
 
+
     try:
         d_from = datetime.strptime(date_from, "%Y-%m-%d")
         d_to = datetime.strptime(date_to, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+
 
     appts = (
         db.query(models.Appointment)
@@ -676,11 +1058,14 @@ def admin_download_invoices(
         .all()
     )
 
+
     if not appts:
         raise HTTPException(status_code=404, detail="No paid appointments found in this date range.")
 
+
     fee = get_setting(db, "consultation_fee")
     fallback_terms = get_setting(db, "consultation_terms") or ""
+
 
     # Generate all invoices and zip them
     zip_buffer = io.BytesIO()
@@ -699,6 +1084,7 @@ def admin_download_invoices(
             filename = f"invoice_{appt.id}_{appt.name.replace(' ', '_')}.pdf"
             zf.write(invoice_path, filename)
 
+
     zip_buffer.seek(0)
     return StreamingResponse(
         zip_buffer,
@@ -709,7 +1095,10 @@ def admin_download_invoices(
     )
 
 
+
+
 # ── Admin: create Zoom meeting ─────────────────────────────────────────────────
+
 
 @router.post("/admin/zoom/create-meeting", response_model=schemas.ZoomMeetingResponse)
 def create_zoom_meeting(

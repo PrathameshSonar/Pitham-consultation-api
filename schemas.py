@@ -4,7 +4,10 @@ from typing import Optional
 from datetime import datetime
 
 
+
+
 # ── Auth ──────────────────────────────────────────────────────────────────────
+
 
 class RegisterRequest(BaseModel):
     name: str
@@ -19,14 +22,20 @@ class RegisterRequest(BaseModel):
     password: str
 
 
+
+
 class LoginRequest(BaseModel):
     email: Optional[str] = None       # can be email or mobile number
     mobile: Optional[str] = None
     password: str
 
 
+
+
 class GoogleLoginRequest(BaseModel):
     credential: str                   # Google ID token from GSI
+
+
 
 
 class TokenResponse(BaseModel):
@@ -34,9 +43,20 @@ class TokenResponse(BaseModel):
     role: str
     name: str
     permissions: list[str] = []   # mirror of UserOut.permissions for client-side gating
+    # True when the user signed in via Google (already verified) OR
+    # explicitly clicked the verification link. The frontend uses this to
+    # decide whether to gate booking / payment screens behind a "please
+    # verify your email" page.
+    email_verified: bool = False
+    # Echoes whatever the user has on their account; if null, no email is
+    # configured (mobile-only signup) and we don't show the verify gate.
+    email: Optional[str] = None
+
+
 
 
 # ── User / Profile ────────────────────────────────────────────────────────────
+
 
 class UserLookupOut(BaseModel):
     """Minimal user info for cross-section name/email/city resolution.
@@ -52,7 +72,10 @@ class UserLookupOut(BaseModel):
     city: Optional[str] = None
     state: Optional[str] = None
 
+
     model_config = {"from_attributes": True}
+
+
 
 
 class UserOut(BaseModel):
@@ -60,17 +83,22 @@ class UserOut(BaseModel):
     name: str
     email: Optional[str] = None
     mobile: str
-    dob: str
-    tob: str
-    birth_place: str
-    city: str
-    state: str
-    country: str
+    # Google-only signups may leave these unset until the user fills in
+    # their first booking — schema mirrors the DB nullability.
+    dob: Optional[str] = None
+    tob: Optional[str] = None
+    birth_place: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
     role: str
     permissions: list[str] = []   # admin section keys; only meaningful for role=="moderator"
+    email_verified: bool = False
     created_at: datetime
 
+
     model_config = {"from_attributes": True}
+
 
     @field_validator("permissions", mode="before")
     @classmethod
@@ -92,7 +120,10 @@ class UserOut(BaseModel):
         return []
 
 
+
+
 # ── Appointment ───────────────────────────────────────────────────────────────
+
 
 class AppointmentOut(BaseModel):
     id: int
@@ -115,12 +146,40 @@ class AppointmentOut(BaseModel):
     zoom_link: Optional[str]
     notes: Optional[str]
     analysis_path: Optional[str] = None
+    # Combined view: legacy primary file + every additional file added via
+    # multi-upload. Computed in the validator below so clients can just
+    # iterate this list without worrying about the storage split.
+    analysis_files: list[str] = []
     analysis_notes: Optional[str] = None
     recording_link: Optional[str] = None
     receipt_path: Optional[str] = None
     created_at: datetime
+    updated_at: Optional[datetime] = None
+
 
     model_config = {"from_attributes": True}
+
+
+    @field_validator("analysis_files", mode="before")
+    @classmethod
+    def _decode_analysis_files(cls, v):
+        # ORM passes the raw Text column (a JSON-encoded list, sometimes
+        # null). API callers may also send an already-parsed list. Be
+        # tolerant of both shapes and ignore garbage.
+        if v is None or v == "":
+            return []
+        if isinstance(v, list):
+            return [str(p) for p in v if p]
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v)
+                if isinstance(parsed, list):
+                    return [str(p) for p in parsed if p]
+            except json.JSONDecodeError:
+                return []
+        return []
+
+
 
 
 class AssignSlotRequest(BaseModel):
@@ -130,6 +189,8 @@ class AssignSlotRequest(BaseModel):
     notes: Optional[str] = None
 
 
+
+
 class RescheduleRequest(BaseModel):
     scheduled_date: str
     scheduled_time: str
@@ -137,8 +198,20 @@ class RescheduleRequest(BaseModel):
     reason: Optional[str] = None
 
 
+
+
 class VerifyPaymentRequest(BaseModel):
+    # The real gateway payment_id — `pay_*` from Razorpay, `SPBSP_*` /
+    # PhonePe txn id, or "OFFLINE_*" if explicitly recording an out-of-band
+    # transfer. Length-validated in the handler; format is also checked there
+    # because the allowed prefixes evolve as gateways change.
     payment_reference: str
+    # Free-form admin justification (why are we marking this paid manually?).
+    # Required so audit logs are meaningful months later when the original
+    # context has evaporated. Stored in the audit_log entry.
+    reason: str
+
+
 
 
 class CreateZoomMeetingRequest(BaseModel):
@@ -148,6 +221,8 @@ class CreateZoomMeetingRequest(BaseModel):
     duration: int = 45
 
 
+
+
 class ZoomMeetingResponse(BaseModel):
     id: int | None = None
     join_url: str
@@ -155,11 +230,16 @@ class ZoomMeetingResponse(BaseModel):
     password: str | None = None
 
 
+
+
 # ── Query ─────────────────────────────────────────────────────────────────────
+
 
 class QueryCreate(BaseModel):
     subject: str
     message: str
+
+
 
 
 class QueryOut(BaseModel):
@@ -172,14 +252,20 @@ class QueryOut(BaseModel):
     status: str
     created_at: datetime
 
+
     model_config = {"from_attributes": True}
+
+
 
 
 class QueryReply(BaseModel):
     reply: str
 
 
+
+
 # ── Document ──────────────────────────────────────────────────────────────────
+
 
 class DocumentOut(BaseModel):
     id: int
@@ -191,12 +277,17 @@ class DocumentOut(BaseModel):
     batch_label: Optional[str] = None
     created_at: datetime
 
+
     model_config = {"from_attributes": True}
+
+
 
 
 class AssignFromGalleryRequest(BaseModel):
     gallery_doc_id: int
     user_id: int
+
+
 
 
 class BulkAssignRequest(BaseModel):
@@ -211,12 +302,17 @@ class BulkAssignRequest(BaseModel):
     description: Optional[str] = None
 
 
+
+
 class BulkAssignResponse(BaseModel):
     assigned_count: int
     skipped: list[str] = []
 
 
+
+
 # ── User Lists ────────────────────────────────────────────────────────────────
+
 
 class UserListCreate(BaseModel):
     name: str
@@ -224,13 +320,19 @@ class UserListCreate(BaseModel):
     user_ids: list[int] = []
 
 
+
+
 class UserListUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
 
 
+
+
 class UserListMembersUpdate(BaseModel):
     user_ids: list[int]   # full replacement of the members list
+
+
 
 
 class UserListOut(BaseModel):
@@ -241,10 +343,14 @@ class UserListOut(BaseModel):
     member_count: int
     member_ids: list[int]
 
+
     model_config = {"from_attributes": True}
 
 
+
+
 # ── Recording ─────────────────────────────────────────────────────────────────
+
 
 class RecordingOut(BaseModel):
     id: int
@@ -254,10 +360,14 @@ class RecordingOut(BaseModel):
     zoom_recording_url: str
     created_at: datetime
 
+
     model_config = {"from_attributes": True}
 
 
+
+
 # ── Event (Pitham upcoming events) ───────────────────────────────────────────
+
 
 class EventCreate(BaseModel):
     title: str
@@ -268,6 +378,8 @@ class EventCreate(BaseModel):
     location_map_url: Optional[str] = None
     image_url: Optional[str] = None
     is_featured: Optional[bool] = False
+
+
 
 
 class EventUpdate(BaseModel):
@@ -281,12 +393,16 @@ class EventUpdate(BaseModel):
     is_featured: Optional[bool] = None
 
 
+
+
 class EventOut(BaseModel):
     id: int
     title: str
     description: Optional[str] = None
     event_date: str
     event_time: Optional[str] = None
+    # Length-in-days for multi-day events. Null/1 = single-day.
+    event_days: Optional[int] = None
     location: Optional[str] = None
     location_map_url: Optional[str] = None
     image_url: Optional[str] = None
@@ -298,7 +414,9 @@ class EventOut(BaseModel):
     registration_config: dict = {}
     created_at: datetime
 
+
     model_config = {"from_attributes": True}
+
 
     @field_validator("registration_config", mode="before")
     @classmethod
@@ -309,19 +427,25 @@ class EventOut(BaseModel):
         return parse_config(v if isinstance(v, str) else None)
 
 
+
+
 # ── Event registration ──────────────────────────────────────────────────────
+
 
 class EventRegistrationCreate(BaseModel):
     """Payload sent by the public registration form. The server uses the
     event's saved registration_config to decide which keys are valid and
     which are required. Unknown keys in `field_values` are silently dropped.
 
+
     `tier_id` is required when the event has tiers configured; ignored
     otherwise (single-fee mode).
+
 
     `attendee_role` distinguishes self-registration ("self" — booker is the
     attendee) from booking on behalf of someone else ("other"). Validated
     server-side; anything else falls back to "self".
+
 
     `reg_id`, when set, signals "retry payment for this existing pending row"
     rather than "create a new registration". Used by the My Events Complete
@@ -332,6 +456,8 @@ class EventRegistrationCreate(BaseModel):
     tier_id: Optional[str] = None
     attendee_role: Optional[str] = "self"
     reg_id: Optional[int] = None
+
+
 
 
 class EventRegistrationOut(BaseModel):
@@ -355,7 +481,9 @@ class EventRegistrationOut(BaseModel):
     receipt_path: Optional[str] = None
     created_at: datetime
 
+
     model_config = {"from_attributes": True}
+
 
     @field_validator("field_values", mode="before")
     @classmethod
@@ -371,8 +499,11 @@ class EventRegistrationOut(BaseModel):
         return {}
 
 
+
+
 class EventRegistrationInitResult(BaseModel):
     """Returned by POST /events/{id}/register. The shape varies by gateway:
+
 
       * gateway="phonepe"  → redirect_url set; frontend window.location's away
       * gateway="razorpay" → razorpay_order set; frontend opens checkout popup,
@@ -389,6 +520,8 @@ class EventRegistrationInitResult(BaseModel):
     razorpay_order: Optional[dict] = None
 
 
+
+
 class RazorpayVerifyRequest(BaseModel):
     """The triple Razorpay's checkout JS hands the frontend after a successful
     payment. The signature is HMAC-SHA256 over `order_id|payment_id` keyed
@@ -398,7 +531,10 @@ class RazorpayVerifyRequest(BaseModel):
     razorpay_signature: str
 
 
+
+
 # ── Testimonial ──────────────────────────────────────────────────────────────
+
 
 class TestimonialCreate(BaseModel):
     name: str
@@ -409,6 +545,8 @@ class TestimonialCreate(BaseModel):
     is_active: Optional[bool] = True
 
 
+
+
 class TestimonialUpdate(BaseModel):
     name: Optional[str] = None
     location: Optional[str] = None
@@ -416,6 +554,8 @@ class TestimonialUpdate(BaseModel):
     photo_path: Optional[str] = None
     sort_order: Optional[int] = None
     is_active: Optional[bool] = None
+
+
 
 
 class TestimonialOut(BaseModel):
@@ -428,10 +568,14 @@ class TestimonialOut(BaseModel):
     is_active: bool = True
     created_at: datetime
 
+
     model_config = {"from_attributes": True}
 
 
+
+
 # ── Pitham Media (banners, videos, instagram) ────────────────────────────────
+
 
 class PithamMediaCreate(BaseModel):
     kind: str                                # "banner" | "video" | "instagram"
@@ -442,12 +586,16 @@ class PithamMediaCreate(BaseModel):
     is_active: Optional[bool] = True
 
 
+
+
 class PithamMediaUpdate(BaseModel):
     title: Optional[str] = None
     url: Optional[str] = None
     image_path: Optional[str] = None
     sort_order: Optional[int] = None
     is_active: Optional[bool] = None
+
+
 
 
 class PithamMediaOut(BaseModel):
@@ -460,10 +608,14 @@ class PithamMediaOut(BaseModel):
     is_active: bool = True
     created_at: datetime
 
+
     model_config = {"from_attributes": True}
 
 
+
+
 # ── Broadcasts ───────────────────────────────────────────────────────────────
+
 
 class BroadcastOut(BaseModel):
     id: int
@@ -476,14 +628,20 @@ class BroadcastOut(BaseModel):
     created_at: datetime
     is_read: bool = False           # set per-user when fetched via /broadcasts/my
 
+
     model_config = {"from_attributes": True}
+
+
 
 
 class UnreadCount(BaseModel):
     count: int
 
 
+
+
 # ── Pitham CMS bundle (single public fetch) ──────────────────────────────────
+
 
 class PithamCmsBundle(BaseModel):
     banners: list[PithamMediaOut]

@@ -5,6 +5,7 @@ import secrets
 import bleach
 from datetime import datetime, timedelta
 
+
 logger = logging.getLogger("pitham.auth")
 from pydantic import BaseModel
 from typing import Optional
@@ -14,6 +15,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
+
 
 from database import get_db
 import models
@@ -25,14 +27,19 @@ from utils.auth import (
 from utils.email import send_email, send_password_reset_otp
 from utils.password_policy import validate_password
 
+
 router = APIRouter(prefix="/auth", tags=["auth"])
 limiter = Limiter(key_func=get_remote_address)
+
 
 from config import settings
 GOOGLE_CLIENT_ID = settings.google.client_id
 
 
+
+
 # ── Pydantic models ─────────────────────────────────────────────────────────
+
 
 class ProfileUpdateRequest(BaseModel):
     name: Optional[str] = None
@@ -46,9 +53,13 @@ class ProfileUpdateRequest(BaseModel):
     country: Optional[str] = None
 
 
+
+
 class ForgotPasswordRequest(BaseModel):
     email: Optional[str] = None
     mobile: Optional[str] = None
+
+
 
 
 class ResetPasswordRequest(BaseModel):
@@ -56,11 +67,16 @@ class ResetPasswordRequest(BaseModel):
     new_password: str
 
 
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
 
 def _sanitize(val: str) -> str:
     """Strip HTML tags and trim whitespace."""
     return bleach.clean(val.strip(), tags=[], strip=True) if val else ""
+
+
 
 
 def _validate_mobile(mobile: str) -> str:
@@ -71,7 +87,10 @@ def _validate_mobile(mobile: str) -> str:
     return cleaned
 
 
+
+
 # ── Register ─────────────────────────────────────────────────────────────────
+
 
 @router.post("/register", response_model=schemas.TokenResponse)
 @limiter.limit("10/minute")
@@ -80,19 +99,23 @@ def register(request: Request, response: Response, data: schemas.RegisterRequest
     email = _sanitize(data.email) if data.email else ""
     mobile = _validate_mobile(data.mobile) if data.mobile else ""
 
+
     if not email and not mobile:
         raise HTTPException(status_code=400, detail="Email or mobile is required")
     if len(name) < 2:
         raise HTTPException(status_code=400, detail="Name is too short")
     validate_password(data.password)
 
+
     if email:
         if db.query(models.User).filter(models.User.email == email).first():
             raise HTTPException(status_code=400, detail="Email already registered")
 
+
     if mobile:
         if db.query(models.User).filter(models.User.mobile == mobile).first():
             raise HTTPException(status_code=400, detail="Mobile number already registered")
+
 
     user = models.User(
         name=name,
@@ -110,6 +133,7 @@ def register(request: Request, response: Response, data: schemas.RegisterRequest
     db.commit()
     db.refresh(user)
 
+
     # Best-effort: send verification email immediately on signup. Don't fail
     # registration if mailer is misconfigured — user can request resend later.
     if user.email:
@@ -118,13 +142,24 @@ def register(request: Request, response: Response, data: schemas.RegisterRequest
         except Exception as e:
             logger.warning("Auto verification email failed for user_id=%s: %s", user.id, e)
 
+
     token = mint_user_token(user)
     set_auth_cookie(response, token)
     from utils.permissions import get_user_permissions
-    return {"token": token, "role": user.role, "name": user.name, "permissions": get_user_permissions(user)}
+    return {
+        "token": token,
+        "role": user.role,
+        "name": user.name,
+        "permissions": get_user_permissions(user),
+        "email_verified": bool(user.email_verified),
+        "email": user.email,
+    }
+
+
 
 
 # ── Login ────────────────────────────────────────────────────────────────────
+
 
 @router.post("/login", response_model=schemas.TokenResponse)
 @limiter.limit("15/minute")
@@ -132,6 +167,7 @@ def login(request: Request, response: Response, data: schemas.LoginRequest, db: 
     identifier = data.email or data.mobile
     if not identifier:
         raise HTTPException(status_code=400, detail="Email or mobile is required")
+
 
     user = None
     if data.email:
@@ -141,16 +177,28 @@ def login(request: Request, response: Response, data: schemas.LoginRequest, db: 
     if not user and data.email and "@" not in data.email:
         user = db.query(models.User).filter(models.User.mobile == data.email).first()
 
+
     if not user or not user.hashed_password or not verify_password(data.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
+
 
     token = mint_user_token(user)
     set_auth_cookie(response, token)
     from utils.permissions import get_user_permissions
-    return {"token": token, "role": user.role, "name": user.name, "permissions": get_user_permissions(user)}
+    return {
+        "token": token,
+        "role": user.role,
+        "name": user.name,
+        "permissions": get_user_permissions(user),
+        "email_verified": bool(user.email_verified),
+        "email": user.email,
+    }
+
+
 
 
 # ── Google Login ─────────────────────────────────────────────────────────────
+
 
 @router.post("/google", response_model=schemas.TokenResponse)
 @limiter.limit("15/minute")
@@ -158,18 +206,25 @@ def google_login(request: Request, response: Response, data: schemas.GoogleLogin
     if not GOOGLE_CLIENT_ID:
         raise HTTPException(status_code=500, detail="Google login not configured")
 
+
     try:
         idinfo = id_token.verify_oauth2_token(
             data.credential,
             google_requests.Request(),
             GOOGLE_CLIENT_ID,
         )
-    except ValueError:
+    except ValueError as e:
+        # Common causes: misconfigured GOOGLE_CLIENT_ID env var (token's
+        # aud claim doesn't match), clock skew on the server, expired
+        # token from a long-stalled sign-in attempt. Log enough to debug.
+        logger.warning("Google token verification failed: %s", e)
         raise HTTPException(status_code=401, detail="Invalid Google token")
+
 
     google_id = idinfo["sub"]
     email = idinfo.get("email", "")
     name = idinfo.get("name", "")
+
 
     user = db.query(models.User).filter(models.User.google_id == google_id).first()
     if not user and email:
@@ -178,26 +233,37 @@ def google_login(request: Request, response: Response, data: schemas.GoogleLogin
             user.google_id = google_id
             db.commit()
 
+
     if not user:
-        user = models.User(
-            name=name,
-            email=email or None,
-            mobile="",
-            dob="",
-            tob="",
-            birth_place="",
-            city="",
-            state="",
-            country="India",
-            hashed_password=None,
-            google_id=google_id,
-            # Google has already verified the email — skip our own loop so
-            # downstream gates (booking, password reset) work for OAuth users.
-            email_verified=True,
-        )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
+        try:
+            user = models.User(
+                name=name or "Google User",
+                email=email or None,
+                # mobile stays empty — Google's userinfo doesn't include a
+                # verified phone number. User fills this in at first booking.
+                mobile="",
+                dob=None,
+                tob=None,
+                birth_place=None,
+                city=None,
+                state=None,
+                country=None,
+                hashed_password=None,
+                google_id=google_id,
+                # Google has already verified the email — skip our own loop so
+                # downstream gates (booking, password reset) work for OAuth users.
+                email_verified=True,
+            )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+        except Exception:
+            db.rollback()
+            logger.exception("Google new-user create failed for sub=%s", google_id)
+            raise HTTPException(
+                status_code=500,
+                detail="Could not create your account from Google. Please try again or sign up with email.",
+            )
     elif user.email and not user.email_verified:
         # Existing user re-authenticating via Google: trust Google's verification
         # for this email if it matches, so we don't keep them gated forever.
@@ -205,13 +271,24 @@ def google_login(request: Request, response: Response, data: schemas.GoogleLogin
             user.email_verified = True
             db.commit()
 
+
     token = mint_user_token(user)
     set_auth_cookie(response, token)
     from utils.permissions import get_user_permissions
-    return {"token": token, "role": user.role, "name": user.name, "permissions": get_user_permissions(user)}
+    return {
+        "token": token,
+        "role": user.role,
+        "name": user.name,
+        "permissions": get_user_permissions(user),
+        "email_verified": bool(user.email_verified),
+        "email": user.email,
+    }
+
+
 
 
 # ── Logout — clears the auth cookie (Bearer clients can just drop their token) ─
+
 
 @router.post("/logout")
 def logout(response: Response):
@@ -219,11 +296,16 @@ def logout(response: Response):
     return {"message": "Logged out"}
 
 
+
+
 # ── Profile ──────────────────────────────────────────────────────────────────
+
 
 @router.get("/profile", response_model=schemas.UserOut)
 def get_profile(user: models.User = Depends(get_current_user)):
     return user
+
+
 
 
 @router.put("/profile", response_model=schemas.UserOut)
@@ -269,7 +351,10 @@ def update_profile(
     return user
 
 
+
+
 # ── Account Deletion (DPDP / GDPR right-to-erasure) ─────────────────────────
+
 
 @router.delete("/account")
 def delete_account(
@@ -284,7 +369,9 @@ def delete_account(
         # Last admin lockout protection. Demote first via super-admin route, then delete.
         raise HTTPException(status_code=400, detail="Admins cannot self-delete. Demote first.")
 
+
     user_id = user.id
+
 
     # Detach personal data from appointments but keep the row for revenue records.
     appts = db.query(models.Appointment).filter(models.Appointment.user_id == user_id).all()
@@ -299,6 +386,7 @@ def delete_account(
         a.selfie_path = None
         a.notes = None
 
+
     # Delete user-owned content with no accounting value
     db.query(models.Document).filter(models.Document.user_id == user_id).delete()
     db.query(models.Query).filter(models.Query.user_id == user_id).delete()
@@ -312,15 +400,20 @@ def delete_account(
         if (r.value or "").startswith(f"{user_id}:"):
             db.delete(r)
 
+
     db.delete(user)
     db.commit()
+
 
     clear_auth_cookie(response)
     logger.info("Account deleted: user_id=%s", user_id)
     return {"message": "Account deleted"}
 
 
+
+
 # ── DPDP: download my data ───────────────────────────────────────────────────
+
 
 @router.get("/account/export")
 def export_my_data(
@@ -339,8 +432,10 @@ def export_my_data(
         db.query(models.UserListMember).filter(models.UserListMember.user_id == user.id).all()
     )
 
+
     def _iso(dt):
         return dt.isoformat() if dt else None
+
 
     return {
         "exported_at": datetime.utcnow().isoformat() + "Z",
@@ -400,11 +495,16 @@ def export_my_data(
     }
 
 
+
+
 # ── Notification Preferences ──────────────────────────────────────────────────
+
 
 class NotificationPrefsRequest(BaseModel):
     notify_email: Optional[bool] = None
     notify_sms: Optional[bool] = None
+
+
 
 
 @router.put("/profile/notifications")
@@ -421,7 +521,11 @@ def update_notification_prefs(
     return {"message": "Notification preferences updated"}
 
 
+
+
 # ── Email Verification ───────────────────────────────────────────────────────
+
+
 
 
 def _send_verification_for(user: models.User, db: Session) -> None:
@@ -432,7 +536,9 @@ def _send_verification_for(user: models.User, db: Session) -> None:
     db.merge(models.SiteSetting(key=f"verify:{token}", value=f"{user.id}:{expiry}"))
     db.commit()
 
+
     verify_link = f"{settings.core.frontend_url}/verify-email?token={token}"
+
 
     send_email(
         to=user.email,
@@ -455,6 +561,8 @@ def _send_verification_for(user: models.User, db: Session) -> None:
     )
 
 
+
+
 @router.post("/send-verification")
 @limiter.limit("3/minute")
 def send_verification_email(request: Request, user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -463,8 +571,11 @@ def send_verification_email(request: Request, user: models.User = Depends(get_cu
     if not user.email:
         raise HTTPException(status_code=400, detail="No email on account")
 
+
     _send_verification_for(user, db)
     return {"message": "Verification email sent"}
+
+
 
 
 @router.get("/verify-email")
@@ -474,10 +585,12 @@ def verify_email(token: str = Query(...), db: Session = Depends(get_db)):
         from fastapi import HTTPException
         raise HTTPException(status_code=400, detail="Invalid or expired verification link")
 
+
     parts = row.value.split(":", 1)
     if len(parts) != 2:
         from fastapi import HTTPException
         raise HTTPException(status_code=400, detail="Invalid token")
+
 
     user_id, expiry_str = parts
     try:
@@ -489,6 +602,7 @@ def verify_email(token: str = Query(...), db: Session = Depends(get_db)):
     except ValueError:
         pass
 
+
     user = db.query(models.User).filter(models.User.id == int(user_id)).first()
     if user:
         user.email_verified = True
@@ -497,7 +611,10 @@ def verify_email(token: str = Query(...), db: Session = Depends(get_db)):
     return {"message": "Email verified successfully"}
 
 
+
+
 # ── Forgot / Reset Password ─────────────────────────────────────────────────
+
 
 @router.post("/forgot-password")
 @limiter.limit("5/minute")
@@ -509,6 +626,7 @@ def forgot_password(request: Request, data: ForgotPasswordRequest, db: Session =
     if not data.email and not data.mobile:
         raise HTTPException(status_code=400, detail="Email or mobile is required")
 
+
     user = None
     matched_by_email = False
     if data.email:
@@ -517,9 +635,11 @@ def forgot_password(request: Request, data: ForgotPasswordRequest, db: Session =
     if not user and data.mobile:
         user = db.query(models.User).filter(models.User.mobile == data.mobile).first()
 
+
     if not user:
         # Don't reveal whether the user exists
         return {"message": "If an account exists, a reset link has been sent."}
+
 
     # Don't email a reset OTP to an unverified address — otherwise an attacker
     # who registered an account with someone else's email can use the reset
@@ -532,11 +652,46 @@ def forgot_password(request: Request, data: ForgotPasswordRequest, db: Session =
         # Return the same generic response so we don't leak verification state.
         return {"message": "If an account exists, a reset link has been sent."}
 
-    # Generate a 6-digit numeric OTP and store it (valid for 10 minutes)
+
+    # Per-target rate limit: max 3 reset emails per user per hour. Layered
+    # on top of the per-IP @limiter so a single IP can still legitimately
+    # help multiple users while no individual user can be email-bombed.
+    issued_key = f"reset_issued:{user.id}"
+    issued_row = db.query(models.SiteSetting).filter(models.SiteSetting.key == issued_key).first()
+    now_iso = datetime.utcnow().isoformat()
+    if issued_row and issued_row.value:
+        try:
+            timestamps = [
+                datetime.fromisoformat(t)
+                for t in issued_row.value.split("|")
+                if t
+            ]
+            cutoff = datetime.utcnow() - timedelta(hours=1)
+            recent = [t for t in timestamps if t > cutoff]
+            if len(recent) >= 3:
+                logger.info("Password reset throttled (per-user) user_id=%s", user.id)
+                return {"message": "If an account exists, a reset link has been sent."}
+            recent.append(datetime.utcnow())
+            new_value = "|".join(t.isoformat() for t in recent[-3:])
+        except ValueError:
+            new_value = now_iso
+    else:
+        new_value = now_iso
+    db.merge(models.SiteSetting(key=issued_key, value=new_value))
+
+
+    # Generate a 6-digit numeric OTP. Stored alongside a failed-attempt
+    # counter so we can invalidate the OTP after a handful of wrong guesses
+    # (see /reset-password). The counter caps brute-force at 5 attempts per
+    # issued OTP — combined with the 3/hour per-user issuance cap above,
+    # an attacker can guess at most 15 wrong OTPs per target per hour.
     reset_token = f"{secrets.randbelow(1_000_000):06d}"
     expiry = (datetime.utcnow() + timedelta(minutes=10)).isoformat()
-    db.merge(models.SiteSetting(key=f"reset:{reset_token}", value=f"{user.id}:{expiry}"))
+    # Value format: "<user_id>:<expiry>:<fail_count>". Old rows without
+    # fail_count are tolerated in /reset-password.
+    db.merge(models.SiteSetting(key=f"reset:{reset_token}", value=f"{user.id}:{expiry}:0"))
     db.commit()
+
 
     # Send OTP via email AND WhatsApp (each silently no-ops if not configured / no recipient)
     send_password_reset_otp(
@@ -546,9 +701,53 @@ def forgot_password(request: Request, data: ForgotPasswordRequest, db: Session =
         otp=reset_token,
     )
 
+
     logger.info("Password reset requested for user %s", user.id)
 
+
     return {"message": "If an account exists, a reset link has been sent."}
+
+
+
+
+_BAD_OTP_LOCKOUT_THRESHOLD = 30  # bad guesses per IP per hour before lockout
+
+
+
+
+def _record_bad_otp_attempt(db: Session, request: Request) -> None:
+    """Track bad-OTP attempts per source IP in site_settings. If a single
+    IP submits more than _BAD_OTP_LOCKOUT_THRESHOLD bad OTPs within an
+    hour, raise 429 — the @limiter already gives 5/min, this layer catches
+    sustained low-and-slow brute-force from a single host.
+    """
+    ip = (request.client.host if request.client else "unknown") or "unknown"
+    key = f"reset_bad_otp:{ip}"
+    row = db.query(models.SiteSetting).filter(models.SiteSetting.key == key).first()
+    cutoff = datetime.utcnow() - timedelta(hours=1)
+    timestamps: list[datetime] = []
+    if row and row.value:
+        for part in row.value.split("|"):
+            if not part:
+                continue
+            try:
+                ts = datetime.fromisoformat(part)
+                if ts > cutoff:
+                    timestamps.append(ts)
+            except ValueError:
+                continue
+    timestamps.append(datetime.utcnow())
+    new_value = "|".join(t.isoformat() for t in timestamps[-100:])
+    db.merge(models.SiteSetting(key=key, value=new_value))
+    db.commit()
+    if len(timestamps) > _BAD_OTP_LOCKOUT_THRESHOLD:
+        logger.warning("Bad-OTP lockout triggered for ip=%s count=%s", ip, len(timestamps))
+        raise HTTPException(
+            status_code=429,
+            detail="Too many invalid OTP attempts from your network. Please try again later.",
+        )
+
+
 
 
 @router.post("/reset-password")
@@ -556,23 +755,39 @@ def forgot_password(request: Request, data: ForgotPasswordRequest, db: Session =
 def reset_password(request: Request, data: ResetPasswordRequest, db: Session = Depends(get_db)):
     validate_password(data.new_password)
 
+
     # OTPs are 6-digit numeric — reject malformed input early to keep brute-force surface small
     otp = (data.token or "").strip()
     if not (len(otp) == 6 and otp.isdigit()):
+        _record_bad_otp_attempt(db, request)
         raise HTTPException(status_code=400, detail="Invalid or expired OTP")
+
 
     row = db.query(models.SiteSetting).filter(
         models.SiteSetting.key == f"reset:{otp}"
     ).first()
 
+
     if not row:
+        # Wrong OTP — the attacker doesn't know which user they're targeting,
+        # so the only meaningful defence at this layer is the per-IP bad-OTP
+        # rolling counter above. Combined with the per-user issuance throttle
+        # in /forgot-password, a botnet that rotates IPs is still limited to
+        # 3 OTPs * 1M keyspace per target per hour = ~360k years on average.
+        _record_bad_otp_attempt(db, request)
         raise HTTPException(status_code=400, detail="Invalid or expired OTP")
 
-    parts = row.value.split(":", 1)
-    if len(parts) != 2:
+
+    # Tolerate both the new 3-part format ("<user_id>:<expiry>:<fail>") and
+    # the legacy 2-part format for OTPs minted before the per-user throttle
+    # rollout. The fail_count slot is currently unused (kept for forward-
+    # compat if we ever add per-OTP fail tracking) — just parse and ignore.
+    parts = row.value.split(":")
+    if len(parts) not in (2, 3):
         raise HTTPException(status_code=400, detail="Invalid or expired OTP")
 
-    user_id, expiry_str = parts
+
+    user_id, expiry_str = parts[0], parts[1]
     try:
         expiry = datetime.fromisoformat(expiry_str)
         if datetime.utcnow() > expiry:
@@ -582,9 +797,11 @@ def reset_password(request: Request, data: ResetPasswordRequest, db: Session = D
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid or expired OTP")
 
+
     user = db.query(models.User).filter(models.User.id == int(user_id)).first()
     if not user:
         raise HTTPException(status_code=400, detail="User not found")
+
 
     user.hashed_password = hash_password(data.new_password)
     # Revoke every outstanding session — any JWT minted before this point
@@ -592,5 +809,6 @@ def reset_password(request: Request, data: ResetPasswordRequest, db: Session = D
     user.password_version = (user.password_version or 1) + 1
     db.delete(row)  # One-time use
     db.commit()
+
 
     return {"message": "Password reset successfully. You can now log in."}

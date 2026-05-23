@@ -2,17 +2,21 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
+
 import bcrypt
 from fastapi import Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import jwt, JWTError
 from sqlalchemy.orm import Session
 
+
 from config import settings
 from database import get_db
 import models
 
+
 logger = logging.getLogger("pitham.auth")
+
 
 ALGORITHM = "HS256"
 # Reduced from 7 days. The previous lifetime gave any stolen token (cookie or
@@ -23,21 +27,41 @@ ACCESS_TOKEN_EXPIRE_HOURS = 8
 COOKIE_NAME = "pitham_session"
 IS_PROD = settings.core.is_production
 
-# Fail fast if SECRET_KEY is not set in production
+
+# Fail fast if SECRET_KEY is not set in production. In dev we accept a
+# fallback but it's NOT the legacy hardcoded literal — that string was
+# committed to the repo, so any deployment that landed in dev mode by
+# accident (misread env var, staging-mis-flagged-as-dev) was signing JWTs
+# with a known-public key. Now the dev fallback is generated fresh in
+# memory per process, which means dev tokens are unforgeable between
+# processes too. Still warn loudly because nobody should be running this
+# in any shared environment without a real SECRET_KEY.
 SECRET_KEY = settings.core.secret_key
 if IS_PROD and not SECRET_KEY:
     raise RuntimeError("SECRET_KEY environment variable must be set in production!")
 if not SECRET_KEY:
-    SECRET_KEY = "dev-only-insecure-key-change-in-production"
-    logger.warning("SECRET_KEY not set — using insecure default. Set it before deploying!")
+    import secrets as _secrets
+
+
+    SECRET_KEY = _secrets.token_urlsafe(48)
+    logger.warning(
+        "SECRET_KEY not set — generated an in-memory key for this process. "
+        "JWTs will be invalidated on every restart. Set SECRET_KEY before "
+        "any non-dev deployment."
+    )
+
 
 # auto_error=False so missing-Bearer doesn't 401 immediately — we'll then try the cookie.
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
+
+
 def hash_password(password: str) -> str:
     pw_bytes = password.encode("utf-8")[:72]
     return bcrypt.hashpw(pw_bytes, bcrypt.gensalt()).decode("utf-8")
+
+
 
 
 def verify_password(plain: str, hashed: str) -> bool:
@@ -46,6 +70,8 @@ def verify_password(plain: str, hashed: str) -> bool:
         return bcrypt.checkpw(pw_bytes, hashed.encode("utf-8"))
     except ValueError:
         return False
+
+
 
 
 def create_token(data: dict) -> str:
@@ -59,6 +85,8 @@ def create_token(data: dict) -> str:
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
+
+
 def mint_user_token(user: "models.User") -> str:
     """Standard token shape for our auth flow — embeds the user's current
     password_version so a future password reset invalidates it."""
@@ -69,6 +97,8 @@ def mint_user_token(user: "models.User") -> str:
     })
 
 
+
+
 def decode_token(token: str) -> dict:
     try:
         return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -76,8 +106,11 @@ def decode_token(token: str) -> dict:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
 
 
+
+
 def set_auth_cookie(response: Response, token: str) -> None:
     """Set the auth token as an httpOnly cookie. Use this on login/register/google success.
+
 
     SameSite policy:
         - prod  → "none" with secure=True. Required so the cookie flows on
@@ -100,8 +133,12 @@ def set_auth_cookie(response: Response, token: str) -> None:
     )
 
 
+
+
 def clear_auth_cookie(response: Response) -> None:
     response.delete_cookie(key=COOKIE_NAME, path="/")
+
+
 
 
 def get_current_user(
@@ -133,11 +170,39 @@ def get_current_user(
     return user
 
 
+
+
 def require_admin(user: models.User = Depends(get_current_user)) -> models.User:
     """Require admin or moderator role."""
     if user.role not in ("admin", "moderator"):
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
+
+
+
+
+def require_email_verified(user: "models.User" = Depends(get_current_user)) -> "models.User":
+    """Block routes that handle payments / bookings until the user has
+    verified their email. Mobile-only accounts (no email on file) bypass —
+    they have no verification flow yet. Google sign-ins set email_verified
+    automatically so they bypass too.
+
+
+    Use as a Depends() on every booking / payment-init route — applying
+    this server-side is the only thing that actually stops a determined
+    user from skipping the frontend verification gate.
+    """
+    if user.email and not user.email_verified:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Please verify your email before continuing. "
+                "Open the link we sent you, or request a fresh verification email."
+            ),
+        )
+    return user
+
+
 
 
 def require_super_admin(user: models.User = Depends(get_current_user)) -> models.User:

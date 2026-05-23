@@ -1,5 +1,6 @@
 """Event registration endpoints — public registration + admin management.
 
+
 Routes:
     POST  /events/{id}/register             — user submits the configured form
     GET   /events/{id}/registration         — current user's own registration row
@@ -10,23 +11,27 @@ Routes:
     POST  /admin/event-registrations/{id}/cancel          — admin cancels a registration
 """
 
+
 from __future__ import annotations
+
 
 import json
 import logging
 from datetime import datetime, timezone
 from typing import List, Optional
 
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
+
 from database import get_db
 import models
 import schemas
 from utils.audit import log_action
-from utils.auth import get_current_user
+from utils.auth import get_current_user, require_email_verified
 from utils.email import (
     send_event_registration_confirmation,
     send_event_waitlist_added,
@@ -43,9 +48,12 @@ from utils.event_payments import (
 from utils import razorpay_gw
 from utils.permissions import require_section
 
+
 logger = logging.getLogger("pitham.events.registrations")
 
+
 router = APIRouter(tags=["event-registrations"])
+
 
 # Section gate for the admin endpoints — same section that owns the public
 # Pitham CMS, so a moderator with pitham_cms permission can view registrations
@@ -53,7 +61,10 @@ router = APIRouter(tags=["event-registrations"])
 _section_admin = require_section("pitham_cms")
 
 
+
+
 # ── Helpers ─────────────────────────────────────────────────────────────────
+
 
 def _get_event_or_404(db: Session, event_id: int) -> models.Event:
     event = db.query(models.Event).filter(models.Event.id == event_id).first()
@@ -62,15 +73,19 @@ def _get_event_or_404(db: Session, event_id: int) -> models.Event:
     return event
 
 
+
+
 def _ensure_registration_open(event: models.Event, config: dict) -> None:
     """Raise 400 if registration isn't currently accepted for this event."""
     if not config.get("enabled"):
         raise HTTPException(status_code=400, detail="Registration is not open for this event.")
 
+
     # Past events
     today = datetime.utcnow().date().isoformat()
     if event.event_date < today:
         raise HTTPException(status_code=400, detail="This event has already taken place.")
+
 
     # Per-event registration deadline (separate from event_date)
     deadline = config.get("deadline")
@@ -84,12 +99,17 @@ def _ensure_registration_open(event: models.Event, config: dict) -> None:
             pass
 
 
+
+
 SEAT_HOLDING_STATUSES = ("confirmed", "pending_payment", "attended")
+
+
 
 
 def _capacity_status(db: Session, event_id: int, config: dict) -> tuple[bool, int, Optional[int]]:
     """Return (is_full, registered_count, cap). is_full=False with cap=None
     means capacity is uncapped — never full.
+
 
     Counts: confirmed + pending_payment + attended. Waitlist + cancelled rows
     don't count toward capacity (a waitlist signup occupies no real spot).
@@ -106,6 +126,8 @@ def _capacity_status(db: Session, event_id: int, config: dict) -> tuple[bool, in
         .count()
     )
     return registered >= int(cap), registered, int(cap)
+
+
 
 
 def _tier_capacity_status(
@@ -130,14 +152,18 @@ def _tier_capacity_status(
     return registered >= int(cap), registered, int(cap)
 
 
+
+
 def _promote_oldest_waitlist(db: Session, event_id: int) -> Optional[models.EventRegistration]:
     """Find the oldest waitlist entry for this event and move it up.
+
 
     For free events the promoted row goes straight to "confirmed".
     For paid events it goes to "pending_payment" with the current fee snapshot —
     the promoted user must come back and complete payment to keep their seat.
     Either way we email them. Returns the promoted row, or None if the
     waitlist was empty.
+
 
     Idempotent: caller is responsible for triggering this only when a real
     seat opens up (e.g. inside a cancel handler). Otherwise we'd over-promote.
@@ -149,11 +175,13 @@ def _promote_oldest_waitlist(db: Session, event_id: int) -> Optional[models.Even
     if not config.get("waitlist_enabled"):
         return None
 
+
     # Re-check capacity — somebody else might have re-registered between the
     # cancel and us. If we're already full, leave the waitlist intact.
     is_full, _, _ = _capacity_status(db, event_id, config)
     if is_full:
         return None
+
 
     waitlist_row = (
         db.query(models.EventRegistration)
@@ -166,6 +194,7 @@ def _promote_oldest_waitlist(db: Session, event_id: int) -> Optional[models.Even
     )
     if not waitlist_row:
         return None
+
 
     fee = int(config.get("fee", 0) or 0)
     waitlist_row.fee_amount = fee
@@ -180,6 +209,7 @@ def _promote_oldest_waitlist(db: Session, event_id: int) -> Optional[models.Even
         waitlist_row.payment_status = "n/a"
     db.commit()
     db.refresh(waitlist_row)
+
 
     # Best-effort notification — never raise from here so a flaky mailer
     # doesn't undo the promotion.
@@ -203,7 +233,10 @@ def _promote_oldest_waitlist(db: Session, event_id: int) -> Optional[models.Even
     except Exception as e:
         logger.warning("waitlist promotion email failed reg=%s: %s", waitlist_row.id, e)
 
+
     return waitlist_row
+
+
 
 
 def _set_order_id(reg: models.EventRegistration, order_id: str) -> None:
@@ -212,6 +245,8 @@ def _set_order_id(reg: models.EventRegistration, order_id: str) -> None:
     the frontend is migrated to read payment_order_id directly."""
     reg.payment_order_id = order_id
     reg.payment_reference = order_id
+
+
 
 
 def _set_payment_id(reg: models.EventRegistration, payment_id: str) -> None:
@@ -223,6 +258,8 @@ def _set_payment_id(reg: models.EventRegistration, payment_id: str) -> None:
     reg.payment_reference = payment_id
 
 
+
+
 def _generate_event_receipt(
     event: models.Event,
     reg: models.EventRegistration,
@@ -232,6 +269,7 @@ def _generate_event_receipt(
     Best-effort: any failure is logged but never raised — receipt generation
     must never roll back a successful payment confirmation. Returns the
     persisted path on success.
+
 
     Caller MUST only invoke this after the row has been verified paid.
     """
@@ -251,6 +289,7 @@ def _generate_event_receipt(
         if reg.attendee_role == "other":
             booker = db.query(models.User).filter(models.User.id == reg.user_id).first()
             booker_name = booker.name if booker else None
+
 
         booked_on = (
             reg.created_at.strftime("%d %B %Y")
@@ -283,6 +322,8 @@ def _generate_event_receipt(
         return None
 
 
+
+
 def _send_confirmation_email(event: models.Event, reg: models.EventRegistration, config: dict) -> None:
     """Best-effort send. Never raises — confirmation failure shouldn't roll
     back a successful registration."""
@@ -309,13 +350,18 @@ def _send_confirmation_email(event: models.Event, reg: models.EventRegistration,
         logger.warning("event-confirmation email failed event=%s reg=%s: %s", event.id, reg.id, e)
 
 
+
+
 # ── User: register for an event ─────────────────────────────────────────────
+
 
 @router.post("/events/{event_id}/register", response_model=schemas.EventRegistrationInitResult)
 def register_for_event(
     event_id: int,
     data: schemas.EventRegistrationCreate,
-    user: models.User = Depends(get_current_user),
+    # Gated behind email verification so a fresh-signup user can't pay for
+    # an event before we've confirmed they own the email on file.
+    user: models.User = Depends(require_email_verified),
     db: Session = Depends(get_db),
 ):
     # Serialise concurrent /register calls for the same event by taking a
@@ -335,7 +381,9 @@ def register_for_event(
         raise HTTPException(status_code=404, detail="Event not found")
     config = parse_config(event.registration_config)
 
+
     _ensure_registration_open(event, config)
+
 
     # ── Retry path — re-fire payment for a specific pending row ───────────
     #
@@ -383,6 +431,7 @@ def register_for_event(
                 status_code=400,
                 detail="This registration does not use an online gateway.",
             )
+
 
         # Re-resolve fee + gateway from the live event/tier config. The
         # snapshot on the row stays for receipt/audit purposes, but a fresh
@@ -446,6 +495,7 @@ def register_for_event(
         except GatewayError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
+
     # ── Tier resolution (registration options) ─────────────────────────────
     # Events can be configured with multiple "options" — Mukhya Yajmaan ₹11000,
     # Annadan Seva ₹8500, etc. Frontend sends the chosen tier_id; backend
@@ -460,7 +510,9 @@ def register_for_event(
         if not selected_tier:
             raise HTTPException(status_code=400, detail="The selected registration option is no longer available.")
 
+
     is_full, _registered, _cap = _capacity_status(db, event_id, config)
+
 
     # Per-tier capacity check happens whether or not the event is globally
     # full — a tier can be sold out even when the event has spots left in
@@ -469,6 +521,7 @@ def register_for_event(
     tier_is_full = False
     if selected_tier:
         tier_is_full, _t_reg, _t_cap = _tier_capacity_status(db, event_id, selected_tier)
+
 
     blocked_by_capacity = is_full or tier_is_full
     if blocked_by_capacity and not config.get("waitlist_enabled"):
@@ -481,12 +534,14 @@ def register_for_event(
         )
     going_to_waitlist = blocked_by_capacity and bool(config.get("waitlist_enabled"))
 
+
     # Validate the submitted form values against the event's config — drops
     # unknown keys, enforces required.
     try:
         cleaned = validate_field_values(config, data.field_values)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
 
     # Validate the attendee role, defaulting to "self" on anything unexpected.
     # "self" → prefill from booker's profile when the form omits a field.
@@ -497,6 +552,7 @@ def register_for_event(
     if attendee_role not in ("self", "other"):
         attendee_role = "self"
 
+
     if attendee_role == "self":
         name   = (cleaned.pop("name", None)   or user.name   or "").strip()
         email  = (cleaned.pop("email", None)  or user.email  or "").strip() or None
@@ -506,8 +562,10 @@ def register_for_event(
         email  = (cleaned.pop("email", None)  or "").strip() or None
         mobile = (cleaned.pop("mobile", None) or "").strip() or None
 
+
     if not name:
         raise HTTPException(status_code=400, detail="Name is required")
+
 
     # When an event has tiers, the chosen tier dictates the fee. Otherwise
     # we fall back to the single `fee` field on the config. Snapshot the
@@ -525,6 +583,7 @@ def register_for_event(
     if fee == 0:
         # All-free tier or no tiers + free fee — bypass any configured gateway.
         gateway = "free"
+
 
     # Waitlist branch — event/tier is full but waitlist is on. Don't touch
     # the gateway; the user will pay (if needed) only when promoted.
@@ -568,6 +627,7 @@ def register_for_event(
             requires_payment_action=False,
         )
 
+
     reg = models.EventRegistration(
         event_id=event_id,
         user_id=user.id,
@@ -587,6 +647,7 @@ def register_for_event(
     db.commit()
     db.refresh(reg)
 
+
     # Dispatch payment (or skip for free/manual)
     try:
         result: GatewayInitResult = initiate_event_payment(
@@ -602,6 +663,7 @@ def register_for_event(
         db.commit()
         raise HTTPException(status_code=400, detail=str(e))
 
+
     if result.reference:
         _set_order_id(reg, result.reference)
     if not result.requires_payment_action:
@@ -612,10 +674,12 @@ def register_for_event(
     db.commit()
     db.refresh(reg)
 
+
     log_action(
         db, user.id, "event_register", "event", event.id,
         f"reg={reg.id} fee={fee} gateway={gateway}",
     )
+
 
     return schemas.EventRegistrationInitResult(
         registration_id=reg.id,
@@ -627,104 +691,19 @@ def register_for_event(
     )
 
 
-# ── User: Razorpay signature verification ───────────────────────────────────
 
-@router.post("/events/registrations/{reg_id}/razorpay-verify")
-def razorpay_verify(
-    reg_id: int,
-    data: schemas.RazorpayVerifyRequest,
-    user: models.User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Called by the frontend after Razorpay's checkout JS reports a
-    successful payment. Verifies the HMAC signature against our key_secret —
-    only Razorpay's servers can mint a valid one — then flips the
-    registration to confirmed and emails the user."""
-    reg = (
-        db.query(models.EventRegistration)
-        .filter(models.EventRegistration.id == reg_id, models.EventRegistration.user_id == user.id)
-        .first()
-    )
-    if not reg:
-        raise HTTPException(status_code=404, detail="Registration not found")
-    if reg.payment_gateway != "razorpay":
-        raise HTTPException(status_code=400, detail="This registration isn't using Razorpay.")
-    if reg.status == "confirmed":
-        return {"success": True, "registration_id": reg.id}
 
-    # Bind the verify request to THIS registration's order. Without this, an
-    # attacker who legitimately paid for a cheap registration could replay
-    # their own (order_id, payment_id, signature) triple against an expensive
-    # one — the HMAC verifies fine because it's signed over what the client
-    # sent, not what we minted at init time.
-    if not reg.payment_order_id or data.razorpay_order_id != reg.payment_order_id:
-        logger.warning(
-            "razorpay order_id mismatch reg=%s expected=%s got=%s",
-            reg.id, reg.payment_order_id, data.razorpay_order_id,
-        )
-        raise HTTPException(status_code=400, detail="Order ID does not match this registration.")
+# NOTE: The previous /events/registrations/{reg_id}/razorpay-verify endpoint
+# has been removed. Razorpay confirmations now flow exclusively through the
+# webhook at /payments/razorpay/webhook. The frontend redirects to a "we're
+# confirming your payment" view after the popup closes and polls the
+# read-only status endpoint until the webhook flips the row.
 
-    # Replay defence — same payment_id can't confirm two registrations. The
-    # lookup is on payment_id specifically (not the legacy payment_reference
-    # column) so it's robust against the two values diverging during
-    # migration of older rows.
-    duplicate = (
-        db.query(models.EventRegistration)
-        .filter(
-            models.EventRegistration.id != reg.id,
-            models.EventRegistration.payment_gateway == "razorpay",
-            models.EventRegistration.payment_status == "paid",
-            models.EventRegistration.payment_id == data.razorpay_payment_id,
-        )
-        .first()
-    )
-    if duplicate:
-        logger.warning(
-            "razorpay payment_id replay reg=%s payment_id=%s already_used_by=%s",
-            reg.id, data.razorpay_payment_id, duplicate.id,
-        )
-        raise HTTPException(status_code=400, detail="This payment has already been used.")
 
-    try:
-        ok = razorpay_gw.verify_payment_signature(
-            db,
-            razorpay_order_id=data.razorpay_order_id,
-            razorpay_payment_id=data.razorpay_payment_id,
-            razorpay_signature=data.razorpay_signature,
-        )
-    except razorpay_gw.RazorpayError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    if not ok:
-        # Signature mismatch — almost always a tampered request, occasionally
-        # a misconfigured key_secret. Either way: do NOT confirm, do not log
-        # this as a successful payment.
-        logger.warning("razorpay signature mismatch reg=%s order=%s", reg.id, data.razorpay_order_id)
-        raise HTTPException(status_code=400, detail="Payment signature could not be verified.")
-
-    reg.payment_status = "paid"
-    _set_payment_id(reg, data.razorpay_payment_id)
-    reg.status = "confirmed"
-    db.commit()
-    db.refresh(reg)
-
-    event = _get_event_or_404(db, reg.event_id)
-    config = parse_config(event.registration_config)
-    # Generate the receipt before sending the confirmation email — the email
-    # body links to the booker's My Events tile, where the receipt button
-    # then lights up immediately.
-    _generate_event_receipt(event, reg, db)
-    _send_confirmation_email(event, reg, config)
-    db.commit()
-
-    log_action(
-        db, user.id, "event_registration_razorpay_verified", "event_registration", reg.id,
-        f"order={data.razorpay_order_id}",
-    )
-    return {"success": True, "registration_id": reg.id}
 
 
 # ── User: my registration for a specific event ──────────────────────────────
+
 
 @router.get("/events/{event_id}/registration", response_model=Optional[schemas.EventRegistrationOut])
 def my_registration(
@@ -748,7 +727,10 @@ def my_registration(
     return reg
 
 
+
+
 # ── User: list of all my registrations (drives /dashboard/events) ───────────
+
 
 @router.get("/me/event-registrations", response_model=List[dict])
 def list_my_registrations(
@@ -780,7 +762,10 @@ def list_my_registrations(
     return out
 
 
+
+
 # ── User: receipt + invoice ────────────────────────────────────────────────
+
 
 @router.post("/events/registrations/{reg_id}/generate-receipt")
 def user_generate_event_receipt(
@@ -791,6 +776,7 @@ def user_generate_event_receipt(
     """Return the existing receipt path for a paid registration, or
     (re)generate it if missing. Refuses for unpaid rows — receipts only
     exist for actually-paid registrations.
+
 
     Idempotent: calling it on an already-receipted row just returns the
     existing path. The PDF on disk is overwritten on regen so the booker's
@@ -817,6 +803,8 @@ def user_generate_event_receipt(
         raise HTTPException(status_code=500, detail="Could not generate receipt right now. Please try again shortly.")
     db.commit()
     return {"receipt_path": path}
+
+
 
 
 @router.post("/events/registrations/{reg_id}/generate-invoice")
@@ -876,7 +864,10 @@ def user_generate_event_invoice(
     return {"invoice_path": path}
 
 
+
+
 # ── User: payment-status poll (after PhonePe redirect) ─────────────────────
+
 
 @router.get("/events/registrations/payment-status")
 def event_payment_status(
@@ -903,14 +894,17 @@ def event_payment_status(
     if not reg:
         raise HTTPException(status_code=404, detail="Registration not found for this transaction")
 
+
     if reg.status == "confirmed":
         return {"success": True, "state": "COMPLETED", "registration_id": reg.id}
+
 
     try:
         status = check_event_payment(txn)
     except Exception as e:
         logger.warning("payment status check failed for txn=%s: %s", txn, e)
         return {"success": False, "state": "PENDING", "registration_id": reg.id}
+
 
     if status.get("success"):
         # Amount-tamper defence: verify PhonePe actually charged the fee we
@@ -925,6 +919,7 @@ def event_payment_status(
                 reg.id, txn, expected_paise, actual_paise,
             )
             return {"success": False, "state": "AMOUNT_MISMATCH", "registration_id": reg.id}
+
 
         reg.payment_status = "paid"
         # PhonePe doesn't expose a separate payment_id distinct from the
@@ -942,6 +937,7 @@ def event_payment_status(
         _send_confirmation_email(event, reg, config)
         db.commit()
 
+
     return {
         "success": bool(status.get("success")),
         "state": status.get("state", "UNKNOWN"),
@@ -949,7 +945,10 @@ def event_payment_status(
     }
 
 
+
+
 # ── Admin: list registrations for an event ─────────────────────────────────
+
 
 @router.get("/admin/events/{event_id}/registrations", response_model=List[schemas.EventRegistrationOut])
 def admin_list_registrations(
@@ -966,7 +965,10 @@ def admin_list_registrations(
     )
 
 
+
+
 # ── Admin: confirm a manual-gateway registration after offline payment ─────
+
 
 class ManualConfirmRequest(BaseModel):
     """Admin must record proof of the offline payment so the audit log isn't
@@ -976,6 +978,8 @@ class ManualConfirmRequest(BaseModel):
     detail dialog."""
     reference: str
     note: Optional[str] = None
+
+
 
 
 @router.post("/admin/event-registrations/{reg_id}/confirm-manual")
@@ -996,6 +1000,7 @@ def admin_confirm_manual_payment(
     if reg.status == "confirmed":
         return {"message": "Already confirmed."}
 
+
     # Require a non-empty reference. Without this any moderator can flip a
     # row to paid with no paper trail beyond the audit-log timestamp; if
     # their account is compromised, that's a free backdoor.
@@ -1008,6 +1013,7 @@ def admin_confirm_manual_payment(
     if len(reference) > 200:
         raise HTTPException(status_code=400, detail="Reference is too long (max 200 chars).")
 
+
     reg.payment_status = "paid"
     # Manual reference becomes the payment_id (treat the admin-supplied
     # value as the post-success identifier — there's no order_id step for
@@ -1017,11 +1023,13 @@ def admin_confirm_manual_payment(
     db.commit()
     db.refresh(reg)
 
+
     event = _get_event_or_404(db, reg.event_id)
     config = parse_config(event.registration_config)
     _generate_event_receipt(event, reg, db)
     _send_confirmation_email(event, reg, config)
     db.commit()
+
 
     detail = f"ref={reference}"
     if data.note:
@@ -1030,7 +1038,10 @@ def admin_confirm_manual_payment(
     return {"message": "Registration confirmed."}
 
 
+
+
 # ── Admin: cancel a registration ────────────────────────────────────────────
+
 
 @router.post("/admin/event-registrations/{reg_id}/cancel")
 def admin_cancel_registration(
@@ -1048,13 +1059,16 @@ def admin_cancel_registration(
     if reg.status == "cancelled":
         return {"message": "Already cancelled."}
 
+
     was_holding_seat = reg.status in ("confirmed", "pending_payment", "attended")
     event_id = reg.event_id
+
 
     reg.status = "cancelled"
     reg.cancelled_at = datetime.utcnow()
     db.commit()
     log_action(db, admin.id, "event_registration_cancel", "event_registration", reg.id, "")
+
 
     promoted_id: Optional[int] = None
     if was_holding_seat:
@@ -1066,11 +1080,14 @@ def admin_cancel_registration(
                 f"replaced reg={reg.id}",
             )
 
+
     return {
         "message": "Registration cancelled."
         + (f" Promoted waitlist registration #{promoted_id}." if promoted_id else ""),
         "promoted_registration_id": promoted_id,
     }
+
+
 
 
 @router.post("/admin/event-registrations/{reg_id}/promote-waitlist")
@@ -1083,6 +1100,7 @@ def admin_promote_waitlist(
     to reorder or pull a particular person up regardless of queue order
     (e.g. honouring a follow-up phone call).
 
+
     Bypasses the auto-promotion's capacity re-check so admin can over-fill
     deliberately. The row's fee/status flips per the current event config."""
     reg = db.query(models.EventRegistration).filter(models.EventRegistration.id == reg_id).first()
@@ -1090,6 +1108,7 @@ def admin_promote_waitlist(
         raise HTTPException(status_code=404, detail="Registration not found")
     if reg.status != "waitlist":
         raise HTTPException(status_code=400, detail="Only waitlist registrations can be promoted.")
+
 
     event = _get_event_or_404(db, reg.event_id)
     config = parse_config(event.registration_config)
@@ -1103,6 +1122,7 @@ def admin_promote_waitlist(
         reg.payment_status = "n/a"
     db.commit()
     db.refresh(reg)
+
 
     try:
         event_url = f"{settings.core.frontend_url}/pitham/events/{event.id}/register"
@@ -1122,11 +1142,15 @@ def admin_promote_waitlist(
     except Exception as e:
         logger.warning("manual waitlist promotion email failed reg=%s: %s", reg.id, e)
 
+
     log_action(db, admin.id, "event_waitlist_promote_manual", "event_registration", reg.id, "")
     return {"message": "Promoted from waitlist.", "registration_id": reg.id, "status": reg.status}
 
 
+
+
 # ── Admin: mark attended after the event ────────────────────────────────────
+
 
 @router.post("/admin/event-registrations/{reg_id}/attended")
 def admin_mark_attended(
